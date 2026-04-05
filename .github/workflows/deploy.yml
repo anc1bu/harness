@@ -16,5 +16,9 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_KEY }}
           script: |
+            set -e
             cd /var/www/harness
             git pull
+            ./venv/bin/pip install --quiet -r requirements.txt
+            systemctl restart harness
+            systemctl reload nginx || true

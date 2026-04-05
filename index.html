@@ -4,13 +4,12 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
   <title>Harness — Sapcons</title>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
   <style>
     :root {
-      --bg:        #0a1410;
-      --panel:     #111c16;
-      --border:    #1f3a2a;
+      --bg:        #0a1628;
+      --panel:     #111f38;
+      --border:    #1f3a5a;
       --accent:    #4ade80;
       --accent2:   #86efac;
       --warn:      #e0b050;
@@ -21,365 +20,236 @@
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      background: var(--bg);
-      color: var(--text);
+      background: var(--bg); color: var(--text);
       font-family: 'Courier New', monospace;
-      height: 100vh;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
+      height: 100vh; display: flex; flex-direction: column; overflow: hidden;
     }
 
-    /* ── TOP BAR ── */
     #topbar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0 24px;
-      height: 52px;
-      background: var(--panel);
-      border-bottom: 1px solid var(--border);
-      flex-shrink: 0;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 0 24px; height: 52px; background: var(--panel);
+      border-bottom: 1px solid var(--border); flex-shrink: 0;
     }
     #topbar .logo {
-      font-size: 18px;
-      font-weight: bold;
-      letter-spacing: 4px;
-      color: var(--accent);
-      text-shadow: var(--glow);
+      font-size: 18px; font-weight: bold; letter-spacing: 4px;
+      color: var(--accent); text-shadow: var(--glow);
     }
     #topbar .logo span { color: var(--accent2); }
-    #topbar .status-row {
-      display: flex;
-      gap: 24px;
-      font-size: 11px;
-      color: var(--text-dim);
-    }
+    #topbar .status-row { display: flex; gap: 24px; font-size: 11px; color: var(--text-dim); }
     #topbar .status-row .dot {
-      display: inline-block;
-      width: 7px; height: 7px;
-      border-radius: 50%;
-      margin-right: 5px;
-      background: var(--text-dim);
+      display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+      margin-right: 5px; background: var(--text-dim);
     }
-    #topbar .status-row .dot.on  { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
-    #topbar .status-row .dot.warn { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+    #topbar .status-row .dot.on { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
+    #topbar .right { display: flex; align-items: center; gap: 16px; }
+    #topbar .user { font-size: 11px; color: var(--text-dim); }
+    #topbar .user span { color: var(--text); }
+    #topbar .logout {
+      font-size: 10px; letter-spacing: 2px; color: var(--text-dim);
+      cursor: pointer; text-transform: uppercase; transition: color .2s;
+    }
+    #topbar .logout:hover { color: var(--danger); }
     #topbar .clock { font-size: 13px; color: var(--accent); letter-spacing: 2px; }
 
-    /* ── MAIN LAYOUT ── */
     #layout {
-      display: grid;
-      grid-template-columns: 300px 1fr;
-      grid-template-rows: 1fr 220px;
-      gap: 1px;
-      flex: 1;
-      overflow: hidden;
-      background: var(--border);
+      display: grid; grid-template-columns: 320px 1fr; grid-template-rows: 1fr 220px;
+      gap: 1px; flex: 1; overflow: hidden; background: var(--border);
     }
-
-    /* ── PANELS ── */
-    .panel {
-      background: var(--panel);
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
+    .panel { background: var(--panel); display: flex; flex-direction: column; overflow: hidden; }
     .panel-header {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 14px;
-      border-bottom: 1px solid var(--border);
-      font-size: 10px;
-      letter-spacing: 3px;
-      color: var(--text-dim);
-      text-transform: uppercase;
-      flex-shrink: 0;
+      display: flex; align-items: center; gap: 8px; padding: 8px 14px;
+      border-bottom: 1px solid var(--border); font-size: 10px; letter-spacing: 3px;
+      color: var(--text-dim); text-transform: uppercase; flex-shrink: 0;
     }
-    .panel-header .ph-dot {
-      width: 6px; height: 6px;
-      border-radius: 50%;
-      background: var(--accent);
-      box-shadow: var(--glow);
-    }
+    .panel-header .ph-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: var(--glow); }
     .panel-body { flex: 1; overflow: auto; padding: 14px; }
-
-    /* ── LEFT: CONTROL PANEL ── */
     #panel-control { grid-row: 1 / 3; }
 
-    /* 3 upload slots, compact */
-    .upload-slot {
-      border: 1px dashed var(--border);
-      border-radius: 4px;
-      padding: 10px 12px;
-      margin-bottom: 8px;
-      cursor: pointer;
+    .ref-slot {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 12px; border: 1px solid var(--border);
+      border-radius: 4px; margin-bottom: 8px; cursor: pointer;
       transition: all .2s;
-      font-size: 11px;
     }
-    .upload-slot:hover, .upload-slot.drag-over {
-      border-color: var(--accent);
-      background: rgba(74,222,128,0.06);
+    .ref-slot:hover { border-color: var(--accent); background: rgba(74,222,128,0.06); }
+    .ref-slot.loaded { border-color: var(--accent2); }
+    .ref-slot .rs-light {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: var(--text-dim); flex-shrink: 0;
     }
-    .upload-slot.loaded {
-      border-style: solid;
-      border-color: var(--accent2);
+    .ref-slot.loaded .rs-light { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
+    .ref-slot .rs-main { flex: 1; min-width: 0; }
+    .ref-slot .rs-title {
+      font-size: 10px; letter-spacing: 2px; text-transform: uppercase;
+      color: var(--accent); margin-bottom: 2px;
     }
-    .upload-slot .slot-title {
-      font-size: 10px;
-      letter-spacing: 2px;
-      color: var(--accent);
-      text-transform: uppercase;
-      margin-bottom: 4px;
+    .ref-slot.loaded .rs-title { color: var(--accent2); }
+    .ref-slot .rs-sub { font-size: 10px; color: var(--text-dim); word-break: break-all; }
+    .ref-slot .rs-replace {
+      font-size: 9px; color: var(--text-dim); letter-spacing: 1px;
+      text-transform: uppercase; padding: 2px 6px;
+      border: 1px solid var(--border); border-radius: 3px;
     }
-    .upload-slot.loaded .slot-title { color: var(--accent2); }
-    .upload-slot .slot-status {
-      font-size: 10px;
-      color: var(--text-dim);
-      word-break: break-all;
+    .ref-slot:hover .rs-replace { color: var(--accent); border-color: var(--accent); }
+
+    .upload-zone {
+      border: 2px dashed var(--border); border-radius: 6px;
+      padding: 18px 12px; text-align: center; cursor: pointer;
+      transition: all .2s; font-size: 11px; color: var(--text-dim);
+      margin-bottom: 10px;
     }
-    .upload-slot.loaded .slot-status { color: var(--text); }
+    .upload-zone:hover, .upload-zone.drag-over {
+      border-color: var(--accent); color: var(--accent);
+      background: rgba(74,222,128,0.05);
+    }
+    .upload-zone .uz-icon { font-size: 22px; margin-bottom: 6px; }
+    .upload-zone .uz-hint { font-size: 9px; opacity: .7; margin-top: 4px; letter-spacing: 1px; }
 
     .ctrl-section { margin-bottom: 14px; }
     .ctrl-label {
-      font-size: 10px;
-      letter-spacing: 2px;
-      color: var(--text-dim);
-      text-transform: uppercase;
-      margin-bottom: 6px;
+      font-size: 10px; letter-spacing: 2px; color: var(--text-dim);
+      text-transform: uppercase; margin-bottom: 6px;
     }
     select, input[type=range], input[type=text] {
-      width: 100%;
-      background: var(--bg);
-      border: 1px solid var(--border);
-      color: var(--text);
-      padding: 7px 10px;
-      border-radius: 4px;
-      font-family: inherit;
-      font-size: 12px;
-      margin-bottom: 6px;
-      outline: none;
+      width: 100%; background: var(--bg); border: 1px solid var(--border);
+      color: var(--text); padding: 7px 10px; border-radius: 4px;
+      font-family: inherit; font-size: 12px; margin-bottom: 6px; outline: none;
     }
     select:focus, input:focus { border-color: var(--accent); }
 
     .btn {
-      display: block;
-      width: 100%;
-      padding: 10px;
-      background: transparent;
-      border: 1px solid var(--accent);
-      color: var(--accent);
-      font-family: inherit;
-      font-size: 11px;
-      letter-spacing: 2px;
-      text-transform: uppercase;
-      cursor: pointer;
-      border-radius: 4px;
-      transition: all .2s;
-      margin-bottom: 8px;
+      display: block; width: 100%; padding: 10px; background: transparent;
+      border: 1px solid var(--accent); color: var(--accent); font-family: inherit;
+      font-size: 11px; letter-spacing: 2px; text-transform: uppercase; cursor: pointer;
+      border-radius: 4px; transition: all .2s; margin-bottom: 8px;
     }
     .btn:hover { background: rgba(74,222,128,0.10); box-shadow: var(--glow); }
-    .btn.primary {
-      border-color: var(--accent2);
-      color: var(--accent2);
-    }
-    .btn.primary:hover {
-      background: rgba(134,239,172,0.10);
-      box-shadow: 0 0 12px rgba(134,239,172,0.28);
-    }
+    .btn.primary { border-color: var(--accent2); color: var(--accent2); }
+    .btn.primary:hover { background: rgba(134,239,172,0.10); box-shadow: 0 0 12px rgba(134,239,172,0.28); }
     .btn.danger { border-color: var(--danger); color: var(--danger); }
     .btn.danger:hover { background: rgba(224,96,96,0.10); }
-    .btn:disabled {
-      border-color: var(--border);
-      color: var(--text-dim);
-      cursor: not-allowed;
-      box-shadow: none;
-    }
+    .btn:disabled { border-color: var(--border); color: var(--text-dim); cursor: not-allowed; box-shadow: none; }
     .btn:disabled:hover { background: transparent; box-shadow: none; }
 
-    .stat-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 8px;
-      margin-bottom: 14px;
-    }
+    .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
     .stat-box {
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      padding: 8px 6px;
-      text-align: center;
+      background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+      padding: 8px 6px; text-align: center;
     }
     .stat-box .sv { font-size: 18px; color: var(--accent); font-weight: bold; }
     .stat-box .sl { font-size: 9px; letter-spacing: 1px; color: var(--text-dim); text-transform: uppercase; margin-top: 2px; }
 
-    /* ── CENTER: GRAPH ── */
     #panel-graph { grid-column: 2; }
-    #graph-svg {
-      width: 100%;
-      height: 100%;
-      display: block;
-    }
-    .node circle {
-      stroke-width: 2px;
-      cursor: pointer;
-      transition: r .15s;
-    }
-    .node text {
-      font-size: 11px;
-      fill: var(--text);
-      pointer-events: none;
-      font-family: 'Courier New', monospace;
-    }
+    #graph-svg { width: 100%; height: 100%; display: block; }
+    .node circle { stroke-width: 2px; cursor: pointer; transition: r .15s; }
+    .node text { font-size: 11px; fill: var(--text); pointer-events: none; font-family: 'Courier New', monospace; }
     .link { stroke: var(--border); stroke-opacity: 0.8; }
     .link.highlighted { stroke: var(--accent); stroke-opacity: 1; }
     .node.highlighted circle { stroke: var(--accent2) !important; }
 
-    /* ── BOTTOM: DATA TABLE ── */
     #panel-table { grid-column: 2; }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 11px;
-    }
+    table { width: 100%; border-collapse: collapse; font-size: 11px; }
     thead th {
-      background: var(--bg);
-      color: var(--accent);
-      padding: 6px 10px;
-      text-align: left;
-      border-bottom: 1px solid var(--border);
-      font-size: 10px;
-      letter-spacing: 1px;
-      position: sticky;
-      top: 0;
-      white-space: nowrap;
+      background: var(--bg); color: var(--accent); padding: 6px 10px;
+      text-align: left; border-bottom: 1px solid var(--border);
+      font-size: 10px; letter-spacing: 1px; position: sticky; top: 0; white-space: nowrap;
     }
-    tbody tr { border-bottom: 1px solid rgba(31,58,42,0.5); }
+    tbody tr { border-bottom: 1px solid rgba(31,58,90,0.5); }
     tbody tr:hover { background: rgba(74,222,128,0.05); }
     tbody td { padding: 5px 10px; color: var(--text); white-space: nowrap; }
     tbody tr.selected td { background: rgba(74,222,128,0.10); color: var(--accent2); }
 
-    /* ── TOOLTIP ── */
     #tooltip {
-      position: fixed;
-      background: var(--panel);
-      border: 1px solid var(--accent);
-      border-radius: 4px;
-      padding: 10px 14px;
-      font-size: 11px;
-      pointer-events: none;
-      display: none;
-      z-index: 999;
-      max-width: 260px;
-      box-shadow: var(--glow);
+      position: fixed; background: var(--panel); border: 1px solid var(--accent);
+      border-radius: 4px; padding: 10px 14px; font-size: 11px; pointer-events: none;
+      display: none; z-index: 999; max-width: 260px; box-shadow: var(--glow);
     }
     #tooltip .tt-title { color: var(--accent2); font-weight: bold; margin-bottom: 6px; }
     #tooltip .tt-row { color: var(--text-dim); margin-bottom: 2px; }
     #tooltip .tt-row span { color: var(--text); }
 
-    /* ── EMPTY STATE ── */
     .empty-state {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      height: 100%;
-      color: var(--text-dim);
-      gap: 12px;
-      font-size: 12px;
-      text-align: center;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      height: 100%; color: var(--text-dim); gap: 12px; font-size: 12px; text-align: center;
     }
     .empty-state .es-icon { font-size: 42px; opacity: .3; }
 
-    /* scrollbar */
     ::-webkit-scrollbar { width: 4px; height: 4px; }
     ::-webkit-scrollbar-track { background: var(--bg); }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
 
-    /* scan-line overlay */
     body::after {
-      content: '';
-      position: fixed;
-      inset: 0;
+      content: ''; position: fixed; inset: 0;
       background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.04) 2px, rgba(0,0,0,0.04) 4px);
-      pointer-events: none;
-      z-index: 1000;
+      pointer-events: none; z-index: 1000;
     }
 
-    /* toast */
     #toast {
-      position: fixed;
-      bottom: 24px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: var(--panel);
-      border: 1px solid var(--accent);
-      color: var(--text);
-      padding: 10px 18px;
-      border-radius: 4px;
-      font-size: 11px;
-      letter-spacing: 1px;
-      box-shadow: var(--glow);
-      z-index: 1001;
-      display: none;
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+      background: var(--panel); border: 1px solid var(--accent); color: var(--text);
+      padding: 10px 18px; border-radius: 4px; font-size: 11px; letter-spacing: 1px;
+      box-shadow: var(--glow); z-index: 1001; display: none; max-width: 80vw;
     }
     #toast.err { border-color: var(--danger); box-shadow: 0 0 12px rgba(224,96,96,0.32); }
   </style>
 </head>
 <body>
 
-<!-- TOP BAR -->
 <div id="topbar">
   <div class="logo">HARNESS <span>//</span> SAPCONS</div>
   <div class="status-row">
-    <div id="st-dd03l"><span class="dot" id="dot-dd03l"></span><span id="st-dd03l-text">DD03L: —</span></div>
-    <div id="st-dd04t"><span class="dot" id="dot-dd04t"></span><span id="st-dd04t-text">DD04T: —</span></div>
-    <div id="st-trans"><span class="dot" id="dot-trans"></span><span id="st-trans-text">DATA: —</span></div>
-    <div id="st-nodes"><span class="dot" id="dot-nodes"></span><span id="st-nodes-text">0 NODES</span></div>
-    <div id="st-edges"><span class="dot" id="dot-edges"></span><span id="st-edges-text">0 LINKS</span></div>
+    <div><span class="dot" id="dot-dd03l"></span><span id="st-dd03l">DD03L: —</span></div>
+    <div><span class="dot" id="dot-dd04t"></span><span id="st-dd04t">DD04T: —</span></div>
+    <div><span class="dot" id="dot-table"></span><span id="st-table">TABLE: —</span></div>
+    <div><span class="dot" id="dot-nodes"></span><span id="st-nodes">0 NODES</span></div>
+    <div><span class="dot" id="dot-edges"></span><span id="st-edges">0 LINKS</span></div>
   </div>
-  <div class="clock" id="clock">--:--:--</div>
+  <div class="right">
+    <div class="user">user: <span id="user-email">—</span></div>
+    <div class="logout" id="btn-logout">Logout</div>
+    <div class="clock" id="clock">--:--:--</div>
+  </div>
 </div>
 
-<!-- MAIN LAYOUT -->
 <div id="layout">
-
-  <!-- LEFT: CONTROLS -->
   <div class="panel" id="panel-control">
     <div class="panel-header"><div class="ph-dot"></div>CONTROL PANEL</div>
     <div class="panel-body">
 
-      <!-- 3 upload slots -->
-      <div class="ctrl-label" style="margin-bottom:6px">Reference Tables</div>
-      <div class="upload-slot" id="zone-dd03l">
-        <div class="slot-title">DD03L · Table Fields</div>
-        <div class="slot-status">drop file or click</div>
+      <div class="ctrl-label" style="margin-bottom:6px">Reference Tables (Server)</div>
+      <div class="ref-slot" id="slot-dd03l">
+        <div class="rs-light"></div>
+        <div class="rs-main">
+          <div class="rs-title">DD03L · Table Fields</div>
+          <div class="rs-sub" id="sub-dd03l">not loaded</div>
+        </div>
+        <div class="rs-replace">Upload</div>
         <input type="file" id="file-dd03l" accept=".xlsx,.xls" hidden>
       </div>
-      <div class="upload-slot" id="zone-dd04t">
-        <div class="slot-title">DD04T · Data Element Texts</div>
-        <div class="slot-status">drop file or click</div>
+      <div class="ref-slot" id="slot-dd04t">
+        <div class="rs-light"></div>
+        <div class="rs-main">
+          <div class="rs-title">DD04T · Data Element Texts</div>
+          <div class="rs-sub" id="sub-dd04t">not loaded</div>
+        </div>
+        <div class="rs-replace">Upload</div>
         <input type="file" id="file-dd04t" accept=".xlsx,.xls" hidden>
       </div>
-      <div class="ctrl-label" style="margin:12px 0 6px">Transactional Data</div>
-      <div class="upload-slot" id="zone-trans">
-        <div class="slot-title">Data Table</div>
-        <div class="slot-status">drop file or click</div>
+
+      <div class="ctrl-label" style="margin:14px 0 6px">Transactional Data</div>
+      <div class="upload-zone" id="zone-trans">
+        <div class="uz-icon">⬆</div>
+        <div>Drop .xlsx here</div>
+        <div class="uz-hint">TABLE_SYSTEM_CLIENT_YYYYMMDD.xlsx</div>
         <input type="file" id="file-trans" accept=".xlsx,.xls" hidden>
       </div>
 
-      <!-- Lookup settings -->
-      <div class="ctrl-section" id="section-tabname" style="display:none">
-        <div class="ctrl-label">Table (TABNAME)</div>
-        <select id="sel-tabname"></select>
+      <div class="ctrl-section" id="section-table" style="display:none">
+        <div class="ctrl-label">Stored Tables</div>
+        <select id="sel-table"></select>
       </div>
 
-      <div class="ctrl-section" id="section-lang" style="display:none">
-        <div class="ctrl-label">Language (DDLANGUAGE)</div>
-        <select id="sel-lang"></select>
-      </div>
-
-      <div class="ctrl-section" id="section-textfield" style="display:none">
+      <div class="ctrl-section" id="section-textfield">
         <div class="ctrl-label">Label Field</div>
         <select id="sel-textfield">
           <option value="SCRTEXT_M" selected>SCRTEXT_M · medium</option>
@@ -390,16 +260,8 @@
         </select>
       </div>
 
-      <!-- trans sheet selector -->
-      <div class="ctrl-section" id="section-sheet" style="display:none">
-        <div class="ctrl-label">Sheet</div>
-        <select id="sel-sheet"></select>
-      </div>
+      <button class="btn primary" id="btn-load" style="display:none">▶ LOAD &amp; RENAME</button>
 
-      <!-- Process button -->
-      <button class="btn primary" id="btn-process" style="display:none">▶ PROCESS &amp; RENAME</button>
-
-      <!-- Column mappings -->
       <div class="ctrl-section" id="section-cols" style="display:none">
         <div class="ctrl-label">Source Node Column</div>
         <select id="sel-source"></select>
@@ -409,7 +271,6 @@
         <select id="sel-label"><option value="">— none —</option></select>
       </div>
 
-      <!-- Graph controls -->
       <div class="ctrl-section" id="section-graph" style="display:none">
         <div class="ctrl-label">Link Strength</div>
         <input type="range" id="range-strength" min="50" max="500" value="150" />
@@ -417,7 +278,6 @@
         <input type="range" id="range-charge" min="-500" max="-20" value="-180" />
       </div>
 
-      <!-- Stats -->
       <div class="stat-grid" id="section-stats" style="display:none">
         <div class="stat-box"><div class="sv" id="stat-rows">0</div><div class="sl">Rows</div></div>
         <div class="stat-box"><div class="sv" id="stat-nodes">0</div><div class="sl">Nodes</div></div>
@@ -425,30 +285,27 @@
         <div class="stat-box"><div class="sv" id="stat-cols">0</div><div class="sl">Columns</div></div>
       </div>
 
-      <!-- Actions -->
       <div id="section-actions" style="display:none">
         <button class="btn" id="btn-render">⟳ RENDER GRAPH</button>
         <button class="btn" id="btn-reset-zoom">⤢ FIT VIEW</button>
-        <button class="btn danger" id="btn-clear">✕ CLEAR ALL</button>
+        <button class="btn danger" id="btn-delete">✕ DELETE TABLE</button>
       </div>
 
     </div>
   </div>
 
-  <!-- CENTER: GRAPH -->
   <div class="panel" id="panel-graph">
     <div class="panel-header"><div class="ph-dot"></div>RELATIONSHIP GRAPH</div>
     <div class="panel-body" style="padding:0;position:relative;">
       <div class="empty-state" id="graph-empty">
         <div class="es-icon">◈</div>
-        <div>Upload DD03L, DD04T and a data table</div>
-        <div style="opacity:.5;font-size:10px">Then press PROCESS &amp; RENAME to map columns</div>
+        <div id="empty-msg">Load a table to begin</div>
+        <div style="opacity:.5;font-size:10px">Upload transactional file, then LOAD &amp; RENAME</div>
       </div>
       <svg id="graph-svg" style="display:none"></svg>
     </div>
   </div>
 
-  <!-- BOTTOM: TABLE -->
   <div class="panel" id="panel-table">
     <div class="panel-header"><div class="ph-dot"></div>DATA TABLE</div>
     <div class="panel-body" style="padding:0;">
@@ -459,196 +316,167 @@
       <div id="table-wrap" style="display:none;height:100%;overflow:auto;"></div>
     </div>
   </div>
-
 </div>
 
-<!-- TOOLTIP -->
 <div id="tooltip">
   <div class="tt-title" id="tt-title"></div>
   <div id="tt-body"></div>
 </div>
-
-<!-- TOAST -->
 <div id="toast"></div>
 
 <script>
-// ── CLOCK ──
-function tick() {
-  const now = new Date();
-  document.getElementById('clock').textContent = now.toTimeString().slice(0,8);
-}
+function tick() { document.getElementById('clock').textContent = new Date().toTimeString().slice(0,8); }
 tick(); setInterval(tick, 1000);
 
-// ── STATE ──
-const workbooks = { dd03l: null, dd04t: null, trans: null };
-let dd03lRows = [];
-let dd04tRows = [];
-let rows = [];
-let columns = [];
-let origCols = [];
-let simulation = null;
-
-// ── TOAST ──
 function toast(msg, isErr=false) {
   const t = document.getElementById('toast');
-  t.textContent = msg;
-  t.className = isErr ? 'err' : '';
+  t.textContent = msg; t.className = isErr ? 'err' : '';
   t.style.display = 'block';
-  clearTimeout(toast._tid);
-  toast._tid = setTimeout(() => t.style.display = 'none', 3500);
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.style.display='none', 4000);
 }
 
-// ── UPLOAD ZONES ──
-function setupZone(type) {
-  const zone = document.getElementById(`zone-${type}`);
+let rows = [], columns = [], simulation = null;
+let serverStatus = null;
+let currentTable = null;
+
+async function checkAuth() {
+  const r = await fetch('/api/auth/me');
+  const d = await r.json();
+  if (!d.authed) { window.location.href = '/login'; return false; }
+  document.getElementById('user-email').textContent = d.email;
+  return true;
+}
+document.getElementById('btn-logout').addEventListener('click', async () => {
+  await fetch('/api/auth/logout', { method: 'POST' });
+  window.location.href = '/login';
+});
+
+async function refreshStatus() {
+  const r = await fetch('/api/status');
+  if (!r.ok) return;
+  const s = await r.json();
+  serverStatus = s;
+  const slot3 = document.getElementById('slot-dd03l');
+  if (s.dd03l) {
+    slot3.classList.add('loaded');
+    document.getElementById('sub-dd03l').textContent =
+      `${s.dd03l.rows} rows · ${s.dd03l.tabnames.length} tables · ${s.dd03l.filename}`;
+    setDot('dd03l', true, `DD03L: ${s.dd03l.rows}r`);
+  } else {
+    slot3.classList.remove('loaded');
+    document.getElementById('sub-dd03l').textContent = 'not loaded';
+    setDot('dd03l', false, 'DD03L: —');
+  }
+  const slot4 = document.getElementById('slot-dd04t');
+  if (s.dd04t) {
+    slot4.classList.add('loaded');
+    document.getElementById('sub-dd04t').textContent =
+      `${s.dd04t.rows} entries · ${s.dd04t.filename}`;
+    setDot('dd04t', true, `DD04T: ${s.dd04t.rows}r`);
+  } else {
+    slot4.classList.remove('loaded');
+    document.getElementById('sub-dd04t').textContent = 'not loaded';
+    setDot('dd04t', false, 'DD04T: —');
+  }
+  const sel = document.getElementById('sel-table');
+  const section = document.getElementById('section-table');
+  if (s.tables && s.tables.length) {
+    sel.innerHTML = s.tables.map(t =>
+      `<option value="${t.name}">${t.name} · ${t.rows}r · ${t.date||''}</option>`).join('');
+    section.style.display = '';
+    document.getElementById('btn-load').style.display = '';
+  } else {
+    section.style.display = 'none';
+    document.getElementById('btn-load').style.display = 'none';
+  }
+}
+
+function hookRefSlot(type) {
+  const slot = document.getElementById(`slot-${type}`);
   const input = document.getElementById(`file-${type}`);
-  zone.addEventListener('click', () => input.click());
-  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
-  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
-  zone.addEventListener('drop', e => {
-    e.preventDefault();
-    zone.classList.remove('drag-over');
-    if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0], type);
-  });
-  input.addEventListener('change', e => {
-    if (e.target.files[0]) loadFile(e.target.files[0], type);
+  slot.addEventListener('click', () => input.click());
+  input.addEventListener('change', async e => {
+    const f = e.target.files[0]; if (!f) return;
+    await uploadRef(type, f);
+    e.target.value = '';
   });
 }
-['dd03l','dd04t','trans'].forEach(setupZone);
+['dd03l','dd04t'].forEach(hookRefSlot);
 
-function loadFile(file, type) {
-  const reader = new FileReader();
-  reader.onload = e => {
-    try {
-      const wb = XLSX.read(e.target.result, { type: 'array' });
-      workbooks[type] = wb;
-      const zone = document.getElementById(`zone-${type}`);
-      zone.classList.add('loaded');
-      zone.querySelector('.slot-status').textContent = file.name;
-      setStatus(type, true, `${type.toUpperCase()}: ${file.name.split('.')[0]}`);
-      if (type === 'dd03l') onDD03L();
-      else if (type === 'dd04t') onDD04T();
-      else if (type === 'trans') onTrans();
-      updateProcessBtn();
-    } catch (err) {
-      toast(`Failed to read ${file.name}: ${err.message}`, true);
-    }
-  };
-  reader.readAsArrayBuffer(file);
-}
-
-// ── ON FILE LOADED ──
-function onDD03L() {
-  const wb = workbooks.dd03l;
-  const allRows = [];
-  wb.SheetNames.forEach(n => {
-    allRows.push(...XLSX.utils.sheet_to_json(wb.Sheets[n], { defval: '' }));
-  });
-  dd03lRows = allRows;
-  // Validate required cols
-  if (!dd03lRows.length || !('TABNAME' in dd03lRows[0]) || !('FIELDNAME' in dd03lRows[0]) || !('ROLLNAME' in dd03lRows[0])) {
-    toast('DD03L missing TABNAME / FIELDNAME / ROLLNAME columns', true);
+async function uploadRef(type, file) {
+  const sub = document.getElementById(`sub-${type}`);
+  sub.textContent = `uploading ${(file.size/1048576).toFixed(1)} MB…`;
+  const fd = new FormData(); fd.append('file', file);
+  try {
+    const r = await fetch(`/api/upload/${type}`, { method: 'POST', body: fd });
+    const d = await r.json();
+    if (!r.ok) { toast(d.error || 'upload failed', true); sub.textContent = 'upload failed'; return; }
+    toast(`${type.toUpperCase()} loaded: ${d.rows} rows`);
+    await refreshStatus();
+  } catch (e) {
+    toast('upload error: ' + e.message, true);
   }
-  // Populate TABNAME
-  const tabnames = [...new Set(dd03lRows.map(r => String(r.TABNAME||'').trim()).filter(Boolean))].sort();
-  const sel = document.getElementById('sel-tabname');
-  sel.innerHTML = tabnames.map(t => `<option>${t}</option>`).join('');
-  document.getElementById('section-tabname').style.display = '';
-  document.getElementById('section-textfield').style.display = '';
 }
 
-function onDD04T() {
-  const wb = workbooks.dd04t;
-  const allRows = [];
-  wb.SheetNames.forEach(n => {
-    allRows.push(...XLSX.utils.sheet_to_json(wb.Sheets[n], { defval: '' }));
-  });
-  dd04tRows = allRows;
-  if (!dd04tRows.length || !('ROLLNAME' in dd04tRows[0]) || !('DDLANGUAGE' in dd04tRows[0])) {
-    toast('DD04T missing ROLLNAME / DDLANGUAGE columns', true);
+const zone = document.getElementById('zone-trans');
+const fileTrans = document.getElementById('file-trans');
+const FNAME_RE = /^([A-Z0-9]+)_([A-Z0-9]+)_(\d+)_(\d{8})\.xlsx?$/i;
+
+zone.addEventListener('click', () => fileTrans.click());
+zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
+zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+zone.addEventListener('drop', e => {
+  e.preventDefault(); zone.classList.remove('drag-over');
+  if (e.dataTransfer.files[0]) uploadTrans(e.dataTransfer.files[0]);
+});
+fileTrans.addEventListener('change', e => {
+  if (e.target.files[0]) uploadTrans(e.target.files[0]);
+  e.target.value = '';
+});
+
+async function uploadTrans(file) {
+  if (!FNAME_RE.test(file.name)) {
+    toast(`bad filename — expected TABLE_SYSTEM_CLIENT_YYYYMMDD.xlsx`, true); return;
   }
-  const langs = [...new Set(dd04tRows.map(r => String(r.DDLANGUAGE||'').trim()).filter(Boolean))].sort();
-  const sel = document.getElementById('sel-lang');
-  sel.innerHTML = langs.map(l => `<option${l==='E'?' selected':''}>${l}</option>`).join('');
-  document.getElementById('section-lang').style.display = '';
+  if (!serverStatus || !serverStatus.dd03l) {
+    toast('upload DD03L first', true); return;
+  }
+  const tbl = file.name.split('_')[0].toUpperCase();
+  if (!serverStatus.dd03l.tabnames.includes(tbl)) {
+    toast(`${tbl} not in DD03L — please re-upload DD03L with this table`, true); return;
+  }
+  toast(`uploading ${file.name}…`);
+  const fd = new FormData(); fd.append('file', file);
+  try {
+    const r = await fetch('/api/upload/trans', { method: 'POST', body: fd });
+    const d = await r.json();
+    if (!r.ok) { toast(`error: ${d.error}${d.hint?' — '+d.hint:''}`, true); return; }
+    toast(`${d.table}: ${d.rows} rows stored`);
+    await refreshStatus();
+    document.getElementById('sel-table').value = d.table;
+  } catch (e) { toast('upload error: '+e.message, true); }
 }
 
-function onTrans() {
-  const wb = workbooks.trans;
-  const sel = document.getElementById('sel-sheet');
-  sel.innerHTML = wb.SheetNames.map(n => `<option>${n}</option>`).join('');
-  document.getElementById('section-sheet').style.display = '';
-}
+document.getElementById('btn-load').addEventListener('click', loadAndRender);
+async function loadAndRender() {
+  const table = document.getElementById('sel-table').value;
+  const tf = document.getElementById('sel-textfield').value;
+  if (!table) return;
+  toast(`loading ${table}…`);
+  const r = await fetch(`/api/data/${table}?textfield=${tf}`);
+  if (!r.ok) { toast('load failed', true); return; }
+  const d = await r.json();
+  rows = d.rows; columns = d.columns; currentTable = table;
+  toast(`${table}: ${d.matched}/${d.total} columns matched · ${rows.length} rows`);
+  setDot('table', true, `TABLE: ${table}`);
 
-function updateProcessBtn() {
-  const ready = workbooks.dd03l && workbooks.dd04t && workbooks.trans;
-  document.getElementById('btn-process').style.display = ready ? '' : 'none';
-}
-
-// ── PROCESS & RENAME ──
-document.getElementById('btn-process').addEventListener('click', processRename);
-
-function processRename() {
-  const tabname = document.getElementById('sel-tabname').value;
-  const lang = document.getElementById('sel-lang').value;
-  const textfield = document.getElementById('sel-textfield').value;
-  const sheetName = document.getElementById('sel-sheet').value;
-
-  // Build FIELDNAME → ROLLNAME (filter by TABNAME)
-  const fieldToRoll = new Map();
-  dd03lRows.forEach(r => {
-    if (String(r.TABNAME||'').trim() === tabname) {
-      const fn = String(r.FIELDNAME||'').trim();
-      const rn = String(r.ROLLNAME||'').trim();
-      if (fn && !fieldToRoll.has(fn)) fieldToRoll.set(fn, rn);
-    }
-  });
-
-  // Build ROLLNAME → label text (filter by DDLANGUAGE)
-  const rollToText = new Map();
-  dd04tRows.forEach(r => {
-    if (String(r.DDLANGUAGE||'').trim() === lang) {
-      const rn = String(r.ROLLNAME||'').trim();
-      const tx = String(r[textfield]||'').trim();
-      if (rn && !rollToText.has(rn)) rollToText.set(rn, tx);
-    }
-  });
-
-  // Load trans sheet
-  const ws = workbooks.trans.Sheets[sheetName];
-  const rawRows = XLSX.utils.sheet_to_json(ws, { defval: '' });
-  origCols = rawRows.length ? Object.keys(rawRows[0]) : [];
-
-  // Build rename map
-  const renameMap = {};
-  let matched = 0;
-  origCols.forEach(c => {
-    const key = String(c).trim();
-    const roll = fieldToRoll.get(key);
-    const text = roll ? rollToText.get(roll) : '';
-    if (text) { renameMap[c] = `${key} - ${text}`; matched++; }
-    else renameMap[c] = key;
-  });
-
-  // Apply renames to rows
-  rows = rawRows.map(r => {
-    const n = {};
-    origCols.forEach(c => n[renameMap[c]] = r[c]);
-    return n;
-  });
-  columns = origCols.map(c => renameMap[c]);
-
-  toast(`Renamed ${matched}/${origCols.length} columns · ${rows.length} rows loaded`);
-
-  // Populate column dropdowns
   ['sel-source','sel-target','sel-label'].forEach(id => {
     const sel = document.getElementById(id);
     const hasNone = id === 'sel-label';
     sel.innerHTML = hasNone ? '<option value="">— none —</option>' : '';
     columns.forEach(c => {
       const opt = document.createElement('option');
-      opt.value = c; opt.textContent = c;
-      sel.appendChild(opt);
+      opt.value = c; opt.textContent = c; sel.appendChild(opt);
     });
   });
   if (document.getElementById('sel-target').options.length > 1)
@@ -656,120 +484,102 @@ function processRename() {
 
   document.getElementById('stat-rows').textContent = rows.length;
   document.getElementById('stat-cols').textContent = columns.length;
-
-  show('section-cols');
-  show('section-graph');
-  show('section-stats');
-  show('section-actions');
-
-  renderTable();
-  renderGraph();
+  show('section-cols'); show('section-graph'); show('section-stats'); show('section-actions');
+  renderTable(); renderGraph();
 }
 
-// ── TABLE ──
+document.getElementById('btn-delete').addEventListener('click', async () => {
+  if (!currentTable) return;
+  if (!confirm(`Delete stored data for ${currentTable}?`)) return;
+  await fetch(`/api/data/${currentTable}`, { method: 'DELETE' });
+  toast(`${currentTable} deleted`);
+  currentTable = null;
+  location.reload();
+});
+
 function renderTable() {
   document.getElementById('table-empty').style.display = 'none';
   const wrap = document.getElementById('table-wrap');
   wrap.style.display = '';
-
   const preview = rows.slice(0, 200);
   let html = '<table><thead><tr>';
   columns.forEach(c => { html += `<th title="${c}">${c}</th>`; });
   html += '</tr></thead><tbody>';
   preview.forEach((r,i) => {
     html += `<tr data-i="${i}">`;
-    columns.forEach(c => { html += `<td>${r[c]}</td>`; });
+    columns.forEach(c => { html += `<td>${r[c] ?? ''}</td>`; });
     html += '</tr>';
   });
-  if (rows.length > 200) {
-    html += `<tr><td colspan="${columns.length}" style="text-align:center;color:var(--text-dim);padding:10px">… ${rows.length - 200} more rows</td></tr>`;
-  }
+  if (rows.length > 200)
+    html += `<tr><td colspan="${columns.length}" style="text-align:center;color:var(--text-dim);padding:10px">… ${rows.length-200} more rows</td></tr>`;
   html += '</tbody></table>';
   wrap.innerHTML = html;
-
   wrap.querySelectorAll('tbody tr[data-i]').forEach(tr => {
     tr.addEventListener('click', () => {
-      wrap.querySelectorAll('tbody tr').forEach(t => t.classList.remove('selected'));
+      wrap.querySelectorAll('tbody tr').forEach(t=>t.classList.remove('selected'));
       tr.classList.add('selected');
       highlightNode(rows[+tr.dataset.i][document.getElementById('sel-source').value]);
     });
   });
 }
 
-// ── GRAPH ──
 function renderGraph() {
   const src = document.getElementById('sel-source').value;
   const tgt = document.getElementById('sel-target').value;
   if (!src || !tgt) return;
-
   document.getElementById('graph-empty').style.display = 'none';
   const svgEl = document.getElementById('graph-svg');
   svgEl.style.display = '';
 
-  const nodeMap = new Map();
-  const links = [];
+  const nodeMap = new Map(), links = [];
   rows.forEach(r => {
-    const s = String(r[src] ?? '').trim();
-    const t = String(r[tgt] ?? '').trim();
+    const s = String(r[src] ?? '').trim(), t = String(r[tgt] ?? '').trim();
     if (!s || !t || s === t) return;
-    if (!nodeMap.has(s)) nodeMap.set(s, { id: s, deg: 0, row: r });
-    if (!nodeMap.has(t)) nodeMap.set(t, { id: t, deg: 0, row: r });
-    nodeMap.get(s).deg++;
-    nodeMap.get(t).deg++;
-    links.push({ source: s, target: t, row: r });
+    if (!nodeMap.has(s)) nodeMap.set(s, {id:s, deg:0, row:r});
+    if (!nodeMap.has(t)) nodeMap.set(t, {id:t, deg:0, row:r});
+    nodeMap.get(s).deg++; nodeMap.get(t).deg++;
+    links.push({source:s, target:t, row:r});
   });
   const nodes = [...nodeMap.values()];
-
   document.getElementById('stat-nodes').textContent = nodes.length;
   document.getElementById('stat-links').textContent = links.length;
-  setStatus('nodes', nodes.length > 0, `${nodes.length} NODES`);
-  setStatus('edges', links.length > 0, `${links.length} LINKS`);
+  setDot('nodes', nodes.length>0, `${nodes.length} NODES`);
+  setDot('edges', links.length>0, `${links.length} LINKS`);
 
   d3.select(svgEl).selectAll('*').remove();
-  const W = svgEl.clientWidth  || svgEl.parentElement.clientWidth;
+  const W = svgEl.clientWidth || svgEl.parentElement.clientWidth;
   const H = svgEl.clientHeight || svgEl.parentElement.clientHeight;
-
-  const svg = d3.select(svgEl).attr('viewBox', `0 0 ${W} ${H}`);
+  const svg = d3.select(svgEl).attr('viewBox',`0 0 ${W} ${H}`);
   const g = svg.append('g');
-  const zoom = d3.zoom().scaleExtent([0.1, 8]).on('zoom', e => g.attr('transform', e.transform));
+  const zoom = d3.zoom().scaleExtent([0.1,8]).on('zoom',e=>g.attr('transform',e.transform));
   svg.call(zoom);
-
   document.getElementById('btn-reset-zoom').onclick = () => {
     const bb = g.node().getBBox();
-    if (!bb.width || !bb.height) { svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity); return; }
-    const scale = 0.9 / Math.max(bb.width / W, bb.height / H);
-    const tx = W/2 - scale * (bb.x + bb.width/2);
-    const ty = H/2 - scale * (bb.y + bb.height/2);
+    if (!bb.width||!bb.height) { svg.transition().duration(500).call(zoom.transform,d3.zoomIdentity); return; }
+    const scale = 0.9 / Math.max(bb.width/W, bb.height/H);
+    const tx = W/2 - scale*(bb.x+bb.width/2), ty = H/2 - scale*(bb.y+bb.height/2);
     svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity.translate(tx,ty).scale(scale));
   };
-
-  const maxDeg = d3.max(nodes, d => d.deg) || 1;
-  const color = d3.scaleLinear().domain([0, maxDeg]).range(['#2a6a3e', '#86efac']);
+  const maxDeg = d3.max(nodes, d=>d.deg) || 1;
+  const color = d3.scaleLinear().domain([0,maxDeg]).range(['#2a6a3e','#86efac']);
   const strength = +document.getElementById('range-strength').value;
   const charge = +document.getElementById('range-charge').value;
-
   if (simulation) simulation.stop();
   simulation = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(links).id(d => d.id).distance(strength * 0.6))
+    .force('link', d3.forceLink(links).id(d=>d.id).distance(strength*0.6))
     .force('charge', d3.forceManyBody().strength(charge))
-    .force('center', d3.forceCenter(W/2, H/2))
+    .force('center', d3.forceCenter(W/2,H/2))
     .force('collide', d3.forceCollide(20));
-
-  const link = g.append('g').selectAll('line')
-    .data(links).join('line').attr('class','link').attr('stroke-width',1.2);
-
-  const node = g.append('g').selectAll('g')
-    .data(nodes).join('g').attr('class','node')
+  const link = g.append('g').selectAll('line').data(links).join('line').attr('class','link').attr('stroke-width',1.2);
+  const node = g.append('g').selectAll('g').data(nodes).join('g').attr('class','node')
     .call(d3.drag()
       .on('start',(e,d)=>{ if(!e.active)simulation.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
       .on('drag',(e,d)=>{ d.fx=e.x; d.fy=e.y; })
       .on('end',(e,d)=>{ if(!e.active)simulation.alphaTarget(0); d.fx=null; d.fy=null; }));
-
-  const radius = d => Math.max(6, Math.min(18, 4 + d.deg * 2));
+  const radius = d => Math.max(6, Math.min(18, 4+d.deg*2));
   node.append('circle').attr('r', radius).attr('fill', d=>color(d.deg)).attr('stroke','rgba(134,239,172,0.35)');
-  node.append('text').attr('dy', d=>radius(d)+12).attr('text-anchor','middle')
-    .text(d => d.id.length>16 ? d.id.slice(0,14)+'…' : d.id);
-
+  node.append('text').attr('dy',d=>radius(d)+12).attr('text-anchor','middle')
+    .text(d=>d.id.length>16 ? d.id.slice(0,14)+'…' : d.id);
   const tooltip = document.getElementById('tooltip');
   node.on('mousemove',(e,d)=>{
     const labelCol = document.getElementById('sel-label').value;
@@ -779,40 +589,35 @@ function renderGraph() {
     if (labelCol && d.row[labelCol]) html += `<div class="tt-row">${labelCol}: <span>${d.row[labelCol]}</span></div>`;
     document.getElementById('tt-body').innerHTML = html;
   }).on('mouseleave',()=>{ tooltip.style.display='none'; });
-
   node.on('click',(e,d)=>highlightNode(d.id));
-
   simulation.on('tick',()=>{
     link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y).attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
-    node.attr('transform', d=>`translate(${d.x},${d.y})`);
+    node.attr('transform',d=>`translate(${d.x},${d.y})`);
   });
-
-  svgEl._link = link;
-  svgEl._node = node;
+  svgEl._link = link; svgEl._node = node;
 }
 
 function highlightNode(id) {
   const svgEl = document.getElementById('graph-svg');
   if (!svgEl._node) return;
-  svgEl._node.classed('highlighted', d => d.id === id);
-  svgEl._link.classed('highlighted', d => d.source.id === id || d.target.id === id);
+  svgEl._node.classed('highlighted', d=>d.id===id);
+  svgEl._link.classed('highlighted', d=>d.source.id===id||d.target.id===id);
 }
 
-// ── CONTROLS ──
 document.getElementById('btn-render').addEventListener('click', renderGraph);
-document.getElementById('btn-clear').addEventListener('click', () => location.reload());
 ['range-strength','range-charge'].forEach(id => {
   document.getElementById(id).addEventListener('change', renderGraph);
 });
 
-// ── HELPERS ──
 function show(id) { document.getElementById(id).style.display = ''; }
-function setStatus(key, on, text) {
+function setDot(key, on, text) {
   const dot = document.getElementById(`dot-${key}`);
-  const txt = document.getElementById(`st-${key}-text`);
-  if (dot) dot.className = 'dot' + (on ? ' on' : '');
+  const txt = document.getElementById(`st-${key}`);
+  if (dot) dot.className = 'dot' + (on?' on':'');
   if (txt) txt.textContent = text;
 }
+
+(async () => { if (await checkAuth()) await refreshStatus(); })();
 </script>
 </body>
 </html>
