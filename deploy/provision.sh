@@ -31,9 +31,16 @@ systemctl restart harness
 
 # nginx config — always sync and reload
 cp deploy/nginx.conf /etc/nginx/sites-available/harness.sapcons.nl
+# Remove any OTHER nginx configs that claim server_name harness.sapcons.nl
+for f in /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
+    [ -e "$f" ] || continue
+    [ "$(readlink -f "$f")" = "/etc/nginx/sites-available/harness.sapcons.nl" ] && continue
+    if grep -q "harness.sapcons.nl" "$f" 2>/dev/null; then
+        echo "Disabling conflicting nginx config: $f"
+        rm -f "$f"
+    fi
+done
 ln -sf /etc/nginx/sites-available/harness.sapcons.nl /etc/nginx/sites-enabled/harness.sapcons.nl
-# Remove any conflicting default that listens on port 80 for this host
-rm -f /etc/nginx/sites-enabled/default
 nginx -t && systemctl reload nginx
 
 echo "✓ Harness provisioned"
