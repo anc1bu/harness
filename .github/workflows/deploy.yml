@@ -19,6 +19,5 @@ jobs:
             set -e
             cd /var/www/harness
             git pull
-            ./venv/bin/pip install --quiet -r requirements.txt
-            systemctl restart harness
-            systemctl reload nginx || true
+            chmod +x deploy/provision.sh
+            ./deploy/provision.sh
