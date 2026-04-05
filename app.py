@@ -1,5 +1,5 @@
 """Harness backend — auth + reference/transactional data store."""
-from flask import Flask, request, jsonify, send_from_directory, session, redirect
+from flask import Flask, request, jsonify, send_from_directory, session, redirect, Response, stream_with_context
 from werkzeug.security import generate_password_hash, check_password_hash
 from openpyxl import load_workbook
 from datetime import datetime, timedelta
@@ -178,62 +178,72 @@ DD04T_DB = os.path.join(DATA, 'reference', 'dd04t.sqlite')
 def up_dd04t():
     f = request.files.get('file')
     if not f: return jsonify(error='no_file'), 400
-    # Stream straight into SQLite — constant memory regardless of file size.
-    # Write to a temp DB and atomically rename on success.
-    tmp_db = DD04T_DB + '.tmp'
-    if os.path.exists(tmp_db): os.remove(tmp_db)
-    c = sqlite3.connect(tmp_db)
-    c.execute('''CREATE TABLE dd04t (
-        rollname TEXT PRIMARY KEY,
-        SCRTEXT_M TEXT, SCRTEXT_L TEXT, SCRTEXT_S TEXT,
-        DDTEXT TEXT, REPTEXT TEXT)''')
-    c.execute('CREATE TABLE dd04t_meta (k TEXT PRIMARY KEY, v TEXT)')
-    # speed up bulk insert
-    c.execute('PRAGMA synchronous=OFF')
-    c.execute('PRAGMA journal_mode=MEMORY')
-    wb = load_workbook(f, read_only=True, data_only=True)
-    eng = {'EN', 'E', 'en', 'e'}
-    seen = set()
-    n = 0
-    BATCH = 5000
-    batch = []
-    c.execute('BEGIN')
-    for sn in wb.sheetnames:
-        ws = wb[sn]
-        headers = None; idx = {}
-        for r in ws.iter_rows(values_only=True):
-            if headers is None:
-                headers = [str(x).strip() if x is not None else '' for x in r]
-                idx = {h: i for i, h in enumerate(headers)}
-                continue
-            if 'ROLLNAME' not in idx or 'DDLANGUAGE' not in idx: break
-            lang_v = r[idx['DDLANGUAGE']]
-            if lang_v is None or str(lang_v).strip() not in eng: continue
-            rn = r[idx['ROLLNAME']]
-            if rn is None: continue
-            rn = str(rn).strip()
-            if not rn or rn in seen: continue
-            seen.add(rn)
-            def cell(key):
-                i = idx.get(key, -1)
-                if i < 0: return ''
-                v = r[i]
-                return '' if v is None else str(v).strip()
-            batch.append((rn, cell('SCRTEXT_M'), cell('SCRTEXT_L'),
-                          cell('SCRTEXT_S'), cell('DDTEXT'), cell('REPTEXT')))
-            n += 1
-            if len(batch) >= BATCH:
+    # Persist the upload to disk first so we can stream progress while parsing.
+    tmp_xlsx = os.path.join(DATA, 'reference', f'_dd04t_upload_{secrets.token_hex(4)}.xlsx')
+    f.save(tmp_xlsx)
+    original_name = f.filename
+
+    def gen():
+        tmp_db = DD04T_DB + '.tmp'
+        try:
+            if os.path.exists(tmp_db): os.remove(tmp_db)
+            c = sqlite3.connect(tmp_db)
+            c.execute('''CREATE TABLE dd04t (
+                rollname TEXT PRIMARY KEY,
+                SCRTEXT_M TEXT, SCRTEXT_L TEXT, SCRTEXT_S TEXT,
+                DDTEXT TEXT, REPTEXT TEXT)''')
+            c.execute('CREATE TABLE dd04t_meta (k TEXT PRIMARY KEY, v TEXT)')
+            c.execute('PRAGMA synchronous=OFF')
+            c.execute('PRAGMA journal_mode=MEMORY')
+            wb = load_workbook(tmp_xlsx, read_only=True, data_only=True)
+            eng = {'EN', 'E', 'en', 'e'}
+            seen = set(); n = 0; BATCH = 5000; batch = []
+            c.execute('BEGIN')
+            yield json.dumps({'event': 'start'}) + '\n'
+            for sn in wb.sheetnames:
+                ws = wb[sn]
+                headers = None; idx = {}
+                for r in ws.iter_rows(values_only=True):
+                    if headers is None:
+                        headers = [str(x).strip() if x is not None else '' for x in r]
+                        idx = {h: i for i, h in enumerate(headers)}
+                        continue
+                    if 'ROLLNAME' not in idx or 'DDLANGUAGE' not in idx: break
+                    lang_v = r[idx['DDLANGUAGE']]
+                    if lang_v is None or str(lang_v).strip() not in eng: continue
+                    rn = r[idx['ROLLNAME']]
+                    if rn is None: continue
+                    rn = str(rn).strip()
+                    if not rn or rn in seen: continue
+                    seen.add(rn)
+                    def cell(key):
+                        i = idx.get(key, -1)
+                        if i < 0: return ''
+                        v = r[i]
+                        return '' if v is None else str(v).strip()
+                    batch.append((rn, cell('SCRTEXT_M'), cell('SCRTEXT_L'),
+                                  cell('SCRTEXT_S'), cell('DDTEXT'), cell('REPTEXT')))
+                    n += 1
+                    if len(batch) >= BATCH:
+                        c.executemany('INSERT OR IGNORE INTO dd04t VALUES (?,?,?,?,?,?)', batch)
+                        batch.clear()
+                        yield json.dumps({'event': 'progress', 'rows': n}) + '\n'
+            if batch:
                 c.executemany('INSERT OR IGNORE INTO dd04t VALUES (?,?,?,?,?,?)', batch)
-                batch.clear()
-    if batch:
-        c.executemany('INSERT OR IGNORE INTO dd04t VALUES (?,?,?,?,?,?)', batch)
-    c.execute('INSERT OR REPLACE INTO dd04t_meta VALUES (?,?)',
-              ('uploadedAt', datetime.utcnow().isoformat() + 'Z'))
-    c.execute('INSERT OR REPLACE INTO dd04t_meta VALUES (?,?)', ('filename', f.filename))
-    c.execute('INSERT OR REPLACE INTO dd04t_meta VALUES (?,?)', ('rows', str(n)))
-    c.commit(); c.close()
-    os.replace(tmp_db, DD04T_DB)
-    return jsonify(ok=True, rows=n)
+            c.execute('INSERT OR REPLACE INTO dd04t_meta VALUES (?,?)',
+                      ('uploadedAt', datetime.utcnow().isoformat() + 'Z'))
+            c.execute('INSERT OR REPLACE INTO dd04t_meta VALUES (?,?)', ('filename', original_name))
+            c.execute('INSERT OR REPLACE INTO dd04t_meta VALUES (?,?)', ('rows', str(n)))
+            c.commit(); c.close()
+            os.replace(tmp_db, DD04T_DB)
+            yield json.dumps({'event': 'done', 'ok': True, 'rows': n}) + '\n'
+        except Exception as e:
+            yield json.dumps({'event': 'error', 'error': str(e)}) + '\n'
+        finally:
+            try: os.remove(tmp_xlsx)
+            except OSError: pass
+
+    return Response(stream_with_context(gen()), mimetype='application/x-ndjson')
 
 def _dd04t_info():
     if not os.path.exists(DD04T_DB): return None

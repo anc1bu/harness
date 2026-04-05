@@ -409,6 +409,31 @@ async function uploadRef(type, file) {
   const fd = new FormData(); fd.append('file', file);
   try {
     const r = await fetch(`/api/upload/${type}`, { method: 'POST', body: fd });
+    // DD04T streams NDJSON progress; DD03L returns plain JSON.
+    const ct = r.headers.get('content-type') || '';
+    if (ct.includes('ndjson')) {
+      const reader = r.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '', last = null;
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let lines = buf.split('\n'); buf = lines.pop();
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const evt = JSON.parse(line);
+            last = evt;
+            if (evt.event === 'progress') sub.textContent = `processing ${evt.rows.toLocaleString()} rows…`;
+            else if (evt.event === 'error') { toast('upload error: ' + evt.error, true); sub.textContent = 'upload failed'; return; }
+          } catch(_) {}
+        }
+      }
+      if (last && last.event === 'done') { toast(`${type.toUpperCase()} loaded: ${last.rows} rows`); await refreshStatus(); }
+      else { toast('upload failed', true); sub.textContent = 'upload failed'; }
+      return;
+    }
     const d = await r.json();
     if (!r.ok) { toast(d.error || 'upload failed', true); sub.textContent = 'upload failed'; return; }
     toast(`${type.toUpperCase()} loaded: ${d.rows} rows`);
