@@ -173,24 +173,24 @@ def up_dd03l():
 
 DD04T_DB = os.path.join(DATA, 'reference', 'dd04t.sqlite')
 
-def _dd04t_db():
-    c = sqlite3.connect(DD04T_DB)
-    c.execute('''CREATE TABLE IF NOT EXISTS dd04t (
-        rollname TEXT PRIMARY KEY,
-        SCRTEXT_M TEXT, SCRTEXT_L TEXT, SCRTEXT_S TEXT,
-        DDTEXT TEXT, REPTEXT TEXT)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS dd04t_meta (
-        k TEXT PRIMARY KEY, v TEXT)''')
-    return c
-
 @app.post('/api/upload/dd04t')
 @login_required
 def up_dd04t():
     f = request.files.get('file')
     if not f: return jsonify(error='no_file'), 400
     # Stream straight into SQLite — constant memory regardless of file size.
-    if os.path.exists(DD04T_DB): os.remove(DD04T_DB)
-    c = _dd04t_db()
+    # Write to a temp DB and atomically rename on success.
+    tmp_db = DD04T_DB + '.tmp'
+    if os.path.exists(tmp_db): os.remove(tmp_db)
+    c = sqlite3.connect(tmp_db)
+    c.execute('''CREATE TABLE dd04t (
+        rollname TEXT PRIMARY KEY,
+        SCRTEXT_M TEXT, SCRTEXT_L TEXT, SCRTEXT_S TEXT,
+        DDTEXT TEXT, REPTEXT TEXT)''')
+    c.execute('CREATE TABLE dd04t_meta (k TEXT PRIMARY KEY, v TEXT)')
+    # speed up bulk insert
+    c.execute('PRAGMA synchronous=OFF')
+    c.execute('PRAGMA journal_mode=MEMORY')
     wb = load_workbook(f, read_only=True, data_only=True)
     eng = {'EN', 'E', 'en', 'e'}
     seen = set()
@@ -232,6 +232,7 @@ def up_dd04t():
     c.execute('INSERT OR REPLACE INTO dd04t_meta VALUES (?,?)', ('filename', f.filename))
     c.execute('INSERT OR REPLACE INTO dd04t_meta VALUES (?,?)', ('rows', str(n)))
     c.commit(); c.close()
+    os.replace(tmp_db, DD04T_DB)
     return jsonify(ok=True, rows=n)
 
 def _dd04t_info():
@@ -242,7 +243,9 @@ def _dd04t_info():
     except sqlite3.OperationalError:
         c.close(); return None
     c.close()
-    return {'loaded': True, 'rows': int(m.get('rows', 0)),
+    rows = int(m.get('rows', 0))
+    if rows == 0: return None
+    return {'loaded': True, 'rows': rows,
             'uploadedAt': m.get('uploadedAt'), 'filename': m.get('filename')}
 
 def _dd04t_lookup(rollnames, textfield):
