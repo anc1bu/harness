@@ -8,16 +8,16 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
   <style>
     :root {
-      --bg:        #080c14;
-      --panel:     #0d1320;
-      --border:    #1c2e4a;
-      --accent:    #00aaff;
-      --accent2:   #00ffcc;
-      --warn:      #ffaa00;
-      --danger:    #ff4455;
-      --text:      #c8d8f0;
-      --text-dim:  #4a6080;
-      --glow:      0 0 12px rgba(0,170,255,0.35);
+      --bg:        #0a1410;
+      --panel:     #111c16;
+      --border:    #1f3a2a;
+      --accent:    #4ade80;
+      --accent2:   #86efac;
+      --warn:      #e0b050;
+      --danger:    #e06060;
+      --text:      #b8d8c2;
+      --text-dim:  #5c8a6d;
+      --glow:      0 0 10px rgba(74,222,128,0.28);
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -119,7 +119,7 @@
     }
     .upload-slot:hover, .upload-slot.drag-over {
       border-color: var(--accent);
-      background: rgba(0,170,255,0.05);
+      background: rgba(74,222,128,0.06);
     }
     .upload-slot.loaded {
       border-style: solid;
@@ -178,17 +178,17 @@
       transition: all .2s;
       margin-bottom: 8px;
     }
-    .btn:hover { background: rgba(0,170,255,0.1); box-shadow: var(--glow); }
+    .btn:hover { background: rgba(74,222,128,0.10); box-shadow: var(--glow); }
     .btn.primary {
       border-color: var(--accent2);
       color: var(--accent2);
     }
     .btn.primary:hover {
-      background: rgba(0,255,204,0.1);
-      box-shadow: 0 0 12px rgba(0,255,204,0.35);
+      background: rgba(134,239,172,0.10);
+      box-shadow: 0 0 12px rgba(134,239,172,0.28);
     }
     .btn.danger { border-color: var(--danger); color: var(--danger); }
-    .btn.danger:hover { background: rgba(255,68,85,0.1); }
+    .btn.danger:hover { background: rgba(224,96,96,0.10); }
     .btn:disabled {
       border-color: var(--border);
       color: var(--text-dim);
@@ -254,10 +254,10 @@
       top: 0;
       white-space: nowrap;
     }
-    tbody tr { border-bottom: 1px solid rgba(28,46,74,0.5); }
-    tbody tr:hover { background: rgba(0,170,255,0.04); }
+    tbody tr { border-bottom: 1px solid rgba(31,58,42,0.5); }
+    tbody tr:hover { background: rgba(74,222,128,0.05); }
     tbody td { padding: 5px 10px; color: var(--text); white-space: nowrap; }
-    tbody tr.selected td { background: rgba(0,170,255,0.08); color: var(--accent2); }
+    tbody tr.selected td { background: rgba(74,222,128,0.10); color: var(--accent2); }
 
     /* ── TOOLTIP ── */
     #tooltip {
@@ -301,7 +301,7 @@
       content: '';
       position: fixed;
       inset: 0;
-      background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.03) 2px, rgba(0,0,0,0.03) 4px);
+      background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.04) 2px, rgba(0,0,0,0.04) 4px);
       pointer-events: none;
       z-index: 1000;
     }
@@ -323,7 +323,7 @@
       z-index: 1001;
       display: none;
     }
-    #toast.err { border-color: var(--danger); box-shadow: 0 0 12px rgba(255,68,85,0.4); }
+    #toast.err { border-color: var(--danger); box-shadow: 0 0 12px rgba(224,96,96,0.32); }
   </style>
 </head>
 <body>
@@ -744,7 +744,7 @@ function renderGraph() {
   };
 
   const maxDeg = d3.max(nodes, d => d.deg) || 1;
-  const color = d3.scaleSequential(d3.interpolateCool).domain([0, maxDeg]);
+  const color = d3.scaleLinear().domain([0, maxDeg]).range(['#2a6a3e', '#86efac']);
   const strength = +document.getElementById('range-strength').value;
   const charge = +document.getElementById('range-charge').value;
 
@@ -766,7 +766,7 @@ function renderGraph() {
       .on('end',(e,d)=>{ if(!e.active)simulation.alphaTarget(0); d.fx=null; d.fy=null; }));
 
   const radius = d => Math.max(6, Math.min(18, 4 + d.deg * 2));
-  node.append('circle').attr('r', radius).attr('fill', d=>color(d.deg)).attr('stroke','rgba(0,170,255,0.4)');
+  node.append('circle').attr('r', radius).attr('fill', d=>color(d.deg)).attr('stroke','rgba(134,239,172,0.35)');
   node.append('text').attr('dy', d=>radius(d)+12).attr('text-anchor','middle')
     .text(d => d.id.length>16 ? d.id.slice(0,14)+'…' : d.id);
 
