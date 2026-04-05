@@ -18,6 +18,10 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=14)
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 
+# Dev bypass: when HARNESS_NO_AUTH=1, skip all auth checks.
+NO_AUTH = os.environ.get('HARNESS_NO_AUTH', '').strip() in ('1', 'true', 'yes')
+DEV_EMAIL = 'dev@harness.local'
+
 # ───────────── DB ─────────────
 def db():
     c = sqlite3.connect(os.path.join(DATA, 'users.db'))
@@ -37,6 +41,8 @@ init_db()
 def login_required(f):
     @wraps(f)
     def w(*a, **kw):
+        if NO_AUTH:
+            return f(*a, **kw)
         if 'uid' not in session:
             return jsonify(error='auth_required'), 401
         return f(*a, **kw)
@@ -86,6 +92,8 @@ def logout():
 
 @app.get('/api/auth/me')
 def me():
+    if NO_AUTH:
+        return jsonify(authed=True, email=DEV_EMAIL, dev=True)
     if 'uid' not in session:
         return jsonify(authed=False)
     return jsonify(authed=True, email=session.get('email'))
@@ -294,12 +302,14 @@ def del_data(table):
 # ───────────── STATIC ─────────────
 @app.get('/')
 def root():
-    if 'uid' not in session:
+    if not NO_AUTH and 'uid' not in session:
         return redirect('/login')
     return send_from_directory(HERE, 'index.html')
 
 @app.get('/login')
 def login_page():
+    if NO_AUTH:
+        return redirect('/')
     return send_from_directory(HERE, 'login.html')
 
 if __name__ == '__main__':
