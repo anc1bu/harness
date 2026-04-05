@@ -243,7 +243,8 @@ def up_dd04t():
             try: os.remove(tmp_xlsx)
             except OSError: pass
 
-    return Response(stream_with_context(gen()), mimetype='application/x-ndjson')
+    return Response(stream_with_context(gen()), mimetype='application/x-ndjson',
+                    headers={'X-Accel-Buffering': 'no', 'Cache-Control': 'no-cache'})
 
 def _dd04t_info():
     if not os.path.exists(DD04T_DB): return None
