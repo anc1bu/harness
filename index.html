@@ -69,7 +69,7 @@
     /* ── MAIN LAYOUT ── */
     #layout {
       display: grid;
-      grid-template-columns: 280px 1fr;
+      grid-template-columns: 300px 1fr;
       grid-template-rows: 1fr 220px;
       gap: 1px;
       flex: 1;
@@ -107,34 +107,48 @@
     /* ── LEFT: CONTROL PANEL ── */
     #panel-control { grid-row: 1 / 3; }
 
-    .upload-zone {
-      border: 2px dashed var(--border);
-      border-radius: 6px;
-      padding: 24px 12px;
-      text-align: center;
+    /* 3 upload slots, compact */
+    .upload-slot {
+      border: 1px dashed var(--border);
+      border-radius: 4px;
+      padding: 10px 12px;
+      margin-bottom: 8px;
       cursor: pointer;
       transition: all .2s;
-      margin-bottom: 16px;
-      color: var(--text-dim);
-      font-size: 12px;
+      font-size: 11px;
     }
-    .upload-zone:hover, .upload-zone.drag-over {
+    .upload-slot:hover, .upload-slot.drag-over {
       border-color: var(--accent);
-      color: var(--accent);
       background: rgba(0,170,255,0.05);
     }
-    .upload-zone .upload-icon { font-size: 28px; margin-bottom: 8px; }
-    #file-input { display: none; }
+    .upload-slot.loaded {
+      border-style: solid;
+      border-color: var(--accent2);
+    }
+    .upload-slot .slot-title {
+      font-size: 10px;
+      letter-spacing: 2px;
+      color: var(--accent);
+      text-transform: uppercase;
+      margin-bottom: 4px;
+    }
+    .upload-slot.loaded .slot-title { color: var(--accent2); }
+    .upload-slot .slot-status {
+      font-size: 10px;
+      color: var(--text-dim);
+      word-break: break-all;
+    }
+    .upload-slot.loaded .slot-status { color: var(--text); }
 
-    .ctrl-section { margin-bottom: 18px; }
+    .ctrl-section { margin-bottom: 14px; }
     .ctrl-label {
       font-size: 10px;
       letter-spacing: 2px;
       color: var(--text-dim);
       text-transform: uppercase;
-      margin-bottom: 8px;
+      margin-bottom: 6px;
     }
-    select, input[type=range] {
+    select, input[type=range], input[type=text] {
       width: 100%;
       background: var(--bg);
       border: 1px solid var(--border);
@@ -146,7 +160,7 @@
       margin-bottom: 6px;
       outline: none;
     }
-    select:focus { border-color: var(--accent); }
+    select:focus, input:focus { border-color: var(--accent); }
 
     .btn {
       display: block;
@@ -165,23 +179,38 @@
       margin-bottom: 8px;
     }
     .btn:hover { background: rgba(0,170,255,0.1); box-shadow: var(--glow); }
+    .btn.primary {
+      border-color: var(--accent2);
+      color: var(--accent2);
+    }
+    .btn.primary:hover {
+      background: rgba(0,255,204,0.1);
+      box-shadow: 0 0 12px rgba(0,255,204,0.35);
+    }
     .btn.danger { border-color: var(--danger); color: var(--danger); }
     .btn.danger:hover { background: rgba(255,68,85,0.1); }
+    .btn:disabled {
+      border-color: var(--border);
+      color: var(--text-dim);
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+    .btn:disabled:hover { background: transparent; box-shadow: none; }
 
     .stat-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 8px;
-      margin-bottom: 16px;
+      margin-bottom: 14px;
     }
     .stat-box {
       background: var(--bg);
       border: 1px solid var(--border);
       border-radius: 4px;
-      padding: 10px 8px;
+      padding: 8px 6px;
       text-align: center;
     }
-    .stat-box .sv { font-size: 22px; color: var(--accent); font-weight: bold; }
+    .stat-box .sv { font-size: 18px; color: var(--accent); font-weight: bold; }
     .stat-box .sl { font-size: 9px; letter-spacing: 1px; color: var(--text-dim); text-transform: uppercase; margin-top: 2px; }
 
     /* ── CENTER: GRAPH ── */
@@ -223,10 +252,11 @@
       letter-spacing: 1px;
       position: sticky;
       top: 0;
+      white-space: nowrap;
     }
     tbody tr { border-bottom: 1px solid rgba(28,46,74,0.5); }
     tbody tr:hover { background: rgba(0,170,255,0.04); }
-    tbody td { padding: 5px 10px; color: var(--text); }
+    tbody td { padding: 5px 10px; color: var(--text); white-space: nowrap; }
     tbody tr.selected td { background: rgba(0,170,255,0.08); color: var(--accent2); }
 
     /* ── TOOLTIP ── */
@@ -240,7 +270,7 @@
       pointer-events: none;
       display: none;
       z-index: 999;
-      max-width: 240px;
+      max-width: 260px;
       box-shadow: var(--glow);
     }
     #tooltip .tt-title { color: var(--accent2); font-weight: bold; margin-bottom: 6px; }
@@ -275,6 +305,25 @@
       pointer-events: none;
       z-index: 1000;
     }
+
+    /* toast */
+    #toast {
+      position: fixed;
+      bottom: 24px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--panel);
+      border: 1px solid var(--accent);
+      color: var(--text);
+      padding: 10px 18px;
+      border-radius: 4px;
+      font-size: 11px;
+      letter-spacing: 1px;
+      box-shadow: var(--glow);
+      z-index: 1001;
+      display: none;
+    }
+    #toast.err { border-color: var(--danger); box-shadow: 0 0 12px rgba(255,68,85,0.4); }
   </style>
 </head>
 <body>
@@ -283,7 +332,9 @@
 <div id="topbar">
   <div class="logo">HARNESS <span>//</span> SAPCONS</div>
   <div class="status-row">
-    <div id="st-file"><span class="dot" id="dot-file"></span><span id="st-file-text">NO FILE</span></div>
+    <div id="st-dd03l"><span class="dot" id="dot-dd03l"></span><span id="st-dd03l-text">DD03L: —</span></div>
+    <div id="st-dd04t"><span class="dot" id="dot-dd04t"></span><span id="st-dd04t-text">DD04T: —</span></div>
+    <div id="st-trans"><span class="dot" id="dot-trans"></span><span id="st-trans-text">DATA: —</span></div>
     <div id="st-nodes"><span class="dot" id="dot-nodes"></span><span id="st-nodes-text">0 NODES</span></div>
     <div id="st-edges"><span class="dot" id="dot-edges"></span><span id="st-edges-text">0 LINKS</span></div>
   </div>
@@ -298,19 +349,55 @@
     <div class="panel-header"><div class="ph-dot"></div>CONTROL PANEL</div>
     <div class="panel-body">
 
-      <!-- Upload -->
-      <div class="upload-zone" id="upload-zone">
-        <div class="upload-icon">⬆</div>
-        <div>Drop Excel file here</div>
-        <div style="margin-top:6px;font-size:10px;opacity:.6">.xlsx / .xls</div>
-        <input type="file" id="file-input" accept=".xlsx,.xls" />
+      <!-- 3 upload slots -->
+      <div class="ctrl-label" style="margin-bottom:6px">Reference Tables</div>
+      <div class="upload-slot" id="zone-dd03l">
+        <div class="slot-title">DD03L · Table Fields</div>
+        <div class="slot-status">drop file or click</div>
+        <input type="file" id="file-dd03l" accept=".xlsx,.xls" hidden>
+      </div>
+      <div class="upload-slot" id="zone-dd04t">
+        <div class="slot-title">DD04T · Data Element Texts</div>
+        <div class="slot-status">drop file or click</div>
+        <input type="file" id="file-dd04t" accept=".xlsx,.xls" hidden>
+      </div>
+      <div class="ctrl-label" style="margin:12px 0 6px">Transactional Data</div>
+      <div class="upload-slot" id="zone-trans">
+        <div class="slot-title">Data Table</div>
+        <div class="slot-status">drop file or click</div>
+        <input type="file" id="file-trans" accept=".xlsx,.xls" hidden>
       </div>
 
-      <!-- Sheet selector -->
+      <!-- Lookup settings -->
+      <div class="ctrl-section" id="section-tabname" style="display:none">
+        <div class="ctrl-label">Table (TABNAME)</div>
+        <select id="sel-tabname"></select>
+      </div>
+
+      <div class="ctrl-section" id="section-lang" style="display:none">
+        <div class="ctrl-label">Language (DDLANGUAGE)</div>
+        <select id="sel-lang"></select>
+      </div>
+
+      <div class="ctrl-section" id="section-textfield" style="display:none">
+        <div class="ctrl-label">Label Field</div>
+        <select id="sel-textfield">
+          <option value="SCRTEXT_M" selected>SCRTEXT_M · medium</option>
+          <option value="SCRTEXT_L">SCRTEXT_L · long</option>
+          <option value="SCRTEXT_S">SCRTEXT_S · short</option>
+          <option value="DDTEXT">DDTEXT</option>
+          <option value="REPTEXT">REPTEXT</option>
+        </select>
+      </div>
+
+      <!-- trans sheet selector -->
       <div class="ctrl-section" id="section-sheet" style="display:none">
         <div class="ctrl-label">Sheet</div>
         <select id="sel-sheet"></select>
       </div>
+
+      <!-- Process button -->
+      <button class="btn primary" id="btn-process" style="display:none">▶ PROCESS &amp; RENAME</button>
 
       <!-- Column mappings -->
       <div class="ctrl-section" id="section-cols" style="display:none">
@@ -318,7 +405,7 @@
         <select id="sel-source"></select>
         <div class="ctrl-label" style="margin-top:10px">Target Node Column</div>
         <select id="sel-target"></select>
-        <div class="ctrl-label" style="margin-top:10px">Label Column (optional)</div>
+        <div class="ctrl-label" style="margin-top:10px">Tooltip Label Column</div>
         <select id="sel-label"><option value="">— none —</option></select>
       </div>
 
@@ -342,7 +429,7 @@
       <div id="section-actions" style="display:none">
         <button class="btn" id="btn-render">⟳ RENDER GRAPH</button>
         <button class="btn" id="btn-reset-zoom">⤢ FIT VIEW</button>
-        <button class="btn danger" id="btn-clear">✕ CLEAR</button>
+        <button class="btn danger" id="btn-clear">✕ CLEAR ALL</button>
       </div>
 
     </div>
@@ -354,8 +441,8 @@
     <div class="panel-body" style="padding:0;position:relative;">
       <div class="empty-state" id="graph-empty">
         <div class="es-icon">◈</div>
-        <div>Upload an Excel file to begin</div>
-        <div style="opacity:.5;font-size:10px">Map source → target columns to visualize relationships</div>
+        <div>Upload DD03L, DD04T and a data table</div>
+        <div style="opacity:.5;font-size:10px">Then press PROCESS &amp; RENAME to map columns</div>
       </div>
       <svg id="graph-svg" style="display:none"></svg>
     </div>
@@ -381,87 +468,192 @@
   <div id="tt-body"></div>
 </div>
 
+<!-- TOAST -->
+<div id="toast"></div>
+
 <script>
 // ── CLOCK ──
 function tick() {
   const now = new Date();
-  document.getElementById('clock').textContent =
-    now.toTimeString().slice(0,8);
+  document.getElementById('clock').textContent = now.toTimeString().slice(0,8);
 }
 tick(); setInterval(tick, 1000);
 
 // ── STATE ──
-let workbook = null;
+const workbooks = { dd03l: null, dd04t: null, trans: null };
+let dd03lRows = [];
+let dd04tRows = [];
 let rows = [];
 let columns = [];
+let origCols = [];
 let simulation = null;
 
-// ── UPLOAD ──
-const zone = document.getElementById('upload-zone');
-const fileInput = document.getElementById('file-input');
+// ── TOAST ──
+function toast(msg, isErr=false) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = isErr ? 'err' : '';
+  t.style.display = 'block';
+  clearTimeout(toast._tid);
+  toast._tid = setTimeout(() => t.style.display = 'none', 3500);
+}
 
-zone.addEventListener('click', () => fileInput.click());
-zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
-zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
-zone.addEventListener('drop', e => {
-  e.preventDefault();
-  zone.classList.remove('drag-over');
-  const file = e.dataTransfer.files[0];
-  if (file) loadFile(file);
-});
-fileInput.addEventListener('change', e => {
-  if (e.target.files[0]) loadFile(e.target.files[0]);
-});
+// ── UPLOAD ZONES ──
+function setupZone(type) {
+  const zone = document.getElementById(`zone-${type}`);
+  const input = document.getElementById(`file-${type}`);
+  zone.addEventListener('click', () => input.click());
+  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault();
+    zone.classList.remove('drag-over');
+    if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0], type);
+  });
+  input.addEventListener('change', e => {
+    if (e.target.files[0]) loadFile(e.target.files[0], type);
+  });
+}
+['dd03l','dd04t','trans'].forEach(setupZone);
 
-function loadFile(file) {
+function loadFile(file, type) {
   const reader = new FileReader();
   reader.onload = e => {
-    workbook = XLSX.read(e.target.result, { type: 'array' });
-    populateSheets();
-    zone.innerHTML = `<div class="upload-icon" style="font-size:18px">✔</div><div style="color:var(--accent)">${file.name}</div>`;
-    setStatus('file', true, file.name.split('.')[0].toUpperCase());
+    try {
+      const wb = XLSX.read(e.target.result, { type: 'array' });
+      workbooks[type] = wb;
+      const zone = document.getElementById(`zone-${type}`);
+      zone.classList.add('loaded');
+      zone.querySelector('.slot-status').textContent = file.name;
+      setStatus(type, true, `${type.toUpperCase()}: ${file.name.split('.')[0]}`);
+      if (type === 'dd03l') onDD03L();
+      else if (type === 'dd04t') onDD04T();
+      else if (type === 'trans') onTrans();
+      updateProcessBtn();
+    } catch (err) {
+      toast(`Failed to read ${file.name}: ${err.message}`, true);
+    }
   };
   reader.readAsArrayBuffer(file);
 }
 
-function populateSheets() {
-  const sel = document.getElementById('sel-sheet');
-  sel.innerHTML = '';
-  workbook.SheetNames.forEach(n => {
-    const opt = document.createElement('option');
-    opt.value = n; opt.textContent = n;
-    sel.appendChild(opt);
+// ── ON FILE LOADED ──
+function onDD03L() {
+  const wb = workbooks.dd03l;
+  const allRows = [];
+  wb.SheetNames.forEach(n => {
+    allRows.push(...XLSX.utils.sheet_to_json(wb.Sheets[n], { defval: '' }));
   });
-  document.getElementById('section-sheet').style.display = '';
-  sel.addEventListener('change', loadSheet);
-  loadSheet();
+  dd03lRows = allRows;
+  // Validate required cols
+  if (!dd03lRows.length || !('TABNAME' in dd03lRows[0]) || !('FIELDNAME' in dd03lRows[0]) || !('ROLLNAME' in dd03lRows[0])) {
+    toast('DD03L missing TABNAME / FIELDNAME / ROLLNAME columns', true);
+  }
+  // Populate TABNAME
+  const tabnames = [...new Set(dd03lRows.map(r => String(r.TABNAME||'').trim()).filter(Boolean))].sort();
+  const sel = document.getElementById('sel-tabname');
+  sel.innerHTML = tabnames.map(t => `<option>${t}</option>`).join('');
+  document.getElementById('section-tabname').style.display = '';
+  document.getElementById('section-textfield').style.display = '';
 }
 
-function loadSheet() {
-  const name = document.getElementById('sel-sheet').value;
-  const ws = workbook.Sheets[name];
-  rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
-  columns = rows.length ? Object.keys(rows[0]) : [];
+function onDD04T() {
+  const wb = workbooks.dd04t;
+  const allRows = [];
+  wb.SheetNames.forEach(n => {
+    allRows.push(...XLSX.utils.sheet_to_json(wb.Sheets[n], { defval: '' }));
+  });
+  dd04tRows = allRows;
+  if (!dd04tRows.length || !('ROLLNAME' in dd04tRows[0]) || !('DDLANGUAGE' in dd04tRows[0])) {
+    toast('DD04T missing ROLLNAME / DDLANGUAGE columns', true);
+  }
+  const langs = [...new Set(dd04tRows.map(r => String(r.DDLANGUAGE||'').trim()).filter(Boolean))].sort();
+  const sel = document.getElementById('sel-lang');
+  sel.innerHTML = langs.map(l => `<option${l==='E'?' selected':''}>${l}</option>`).join('');
+  document.getElementById('section-lang').style.display = '';
+}
 
-  // fill column selectors
+function onTrans() {
+  const wb = workbooks.trans;
+  const sel = document.getElementById('sel-sheet');
+  sel.innerHTML = wb.SheetNames.map(n => `<option>${n}</option>`).join('');
+  document.getElementById('section-sheet').style.display = '';
+}
+
+function updateProcessBtn() {
+  const ready = workbooks.dd03l && workbooks.dd04t && workbooks.trans;
+  document.getElementById('btn-process').style.display = ready ? '' : 'none';
+}
+
+// ── PROCESS & RENAME ──
+document.getElementById('btn-process').addEventListener('click', processRename);
+
+function processRename() {
+  const tabname = document.getElementById('sel-tabname').value;
+  const lang = document.getElementById('sel-lang').value;
+  const textfield = document.getElementById('sel-textfield').value;
+  const sheetName = document.getElementById('sel-sheet').value;
+
+  // Build FIELDNAME → ROLLNAME (filter by TABNAME)
+  const fieldToRoll = new Map();
+  dd03lRows.forEach(r => {
+    if (String(r.TABNAME||'').trim() === tabname) {
+      const fn = String(r.FIELDNAME||'').trim();
+      const rn = String(r.ROLLNAME||'').trim();
+      if (fn && !fieldToRoll.has(fn)) fieldToRoll.set(fn, rn);
+    }
+  });
+
+  // Build ROLLNAME → label text (filter by DDLANGUAGE)
+  const rollToText = new Map();
+  dd04tRows.forEach(r => {
+    if (String(r.DDLANGUAGE||'').trim() === lang) {
+      const rn = String(r.ROLLNAME||'').trim();
+      const tx = String(r[textfield]||'').trim();
+      if (rn && !rollToText.has(rn)) rollToText.set(rn, tx);
+    }
+  });
+
+  // Load trans sheet
+  const ws = workbooks.trans.Sheets[sheetName];
+  const rawRows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+  origCols = rawRows.length ? Object.keys(rawRows[0]) : [];
+
+  // Build rename map
+  const renameMap = {};
+  let matched = 0;
+  origCols.forEach(c => {
+    const key = String(c).trim();
+    const roll = fieldToRoll.get(key);
+    const text = roll ? rollToText.get(roll) : '';
+    if (text) { renameMap[c] = `${key} - ${text}`; matched++; }
+    else renameMap[c] = key;
+  });
+
+  // Apply renames to rows
+  rows = rawRows.map(r => {
+    const n = {};
+    origCols.forEach(c => n[renameMap[c]] = r[c]);
+    return n;
+  });
+  columns = origCols.map(c => renameMap[c]);
+
+  toast(`Renamed ${matched}/${origCols.length} columns · ${rows.length} rows loaded`);
+
+  // Populate column dropdowns
   ['sel-source','sel-target','sel-label'].forEach(id => {
     const sel = document.getElementById(id);
     const hasNone = id === 'sel-label';
     sel.innerHTML = hasNone ? '<option value="">— none —</option>' : '';
-    columns.forEach((c,i) => {
+    columns.forEach(c => {
       const opt = document.createElement('option');
       opt.value = c; opt.textContent = c;
-      if (!hasNone && i === 0) opt.selected = true;
-      if (!hasNone && i === 1) { /* second col default for target */ }
       sel.appendChild(opt);
     });
-    if (!hasNone && columns.length > 1)
-      sel.options[1] && (sel.options[id==='sel-target'?1:0].selected = true);
   });
   if (document.getElementById('sel-target').options.length > 1)
     document.getElementById('sel-target').selectedIndex = 1;
 
-  // update stats
   document.getElementById('stat-rows').textContent = rows.length;
   document.getElementById('stat-cols').textContent = columns.length;
 
@@ -482,17 +674,20 @@ function renderTable() {
 
   const preview = rows.slice(0, 200);
   let html = '<table><thead><tr>';
-  columns.forEach(c => { html += `<th>${c}</th>`; });
+  columns.forEach(c => { html += `<th title="${c}">${c}</th>`; });
   html += '</tr></thead><tbody>';
   preview.forEach((r,i) => {
     html += `<tr data-i="${i}">`;
     columns.forEach(c => { html += `<td>${r[c]}</td>`; });
     html += '</tr>';
   });
+  if (rows.length > 200) {
+    html += `<tr><td colspan="${columns.length}" style="text-align:center;color:var(--text-dim);padding:10px">… ${rows.length - 200} more rows</td></tr>`;
+  }
   html += '</tbody></table>';
   wrap.innerHTML = html;
 
-  wrap.querySelectorAll('tbody tr').forEach(tr => {
+  wrap.querySelectorAll('tbody tr[data-i]').forEach(tr => {
     tr.addEventListener('click', () => {
       wrap.querySelectorAll('tbody tr').forEach(t => t.classList.remove('selected'));
       tr.classList.add('selected');
@@ -511,10 +706,8 @@ function renderGraph() {
   const svgEl = document.getElementById('graph-svg');
   svgEl.style.display = '';
 
-  // Build node/link sets
   const nodeMap = new Map();
   const links = [];
-
   rows.forEach(r => {
     const s = String(r[src] ?? '').trim();
     const t = String(r[tgt] ?? '').trim();
@@ -525,98 +718,75 @@ function renderGraph() {
     nodeMap.get(t).deg++;
     links.push({ source: s, target: t, row: r });
   });
-
   const nodes = [...nodeMap.values()];
 
-  // stats
   document.getElementById('stat-nodes').textContent = nodes.length;
   document.getElementById('stat-links').textContent = links.length;
   setStatus('nodes', nodes.length > 0, `${nodes.length} NODES`);
   setStatus('edges', links.length > 0, `${links.length} LINKS`);
 
-  // Clear SVG
   d3.select(svgEl).selectAll('*').remove();
-
   const W = svgEl.clientWidth  || svgEl.parentElement.clientWidth;
   const H = svgEl.clientHeight || svgEl.parentElement.clientHeight;
 
-  const svg = d3.select(svgEl)
-    .attr('viewBox', `0 0 ${W} ${H}`);
-
+  const svg = d3.select(svgEl).attr('viewBox', `0 0 ${W} ${H}`);
   const g = svg.append('g');
-
-  // Zoom
   const zoom = d3.zoom().scaleExtent([0.1, 8]).on('zoom', e => g.attr('transform', e.transform));
   svg.call(zoom);
 
   document.getElementById('btn-reset-zoom').onclick = () => {
-    svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity);
+    const bb = g.node().getBBox();
+    if (!bb.width || !bb.height) { svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity); return; }
+    const scale = 0.9 / Math.max(bb.width / W, bb.height / H);
+    const tx = W/2 - scale * (bb.x + bb.width/2);
+    const ty = H/2 - scale * (bb.y + bb.height/2);
+    svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity.translate(tx,ty).scale(scale));
   };
 
-  // Color scale by degree
   const maxDeg = d3.max(nodes, d => d.deg) || 1;
   const color = d3.scaleSequential(d3.interpolateCool).domain([0, maxDeg]);
-
   const strength = +document.getElementById('range-strength').value;
-  const charge   = +document.getElementById('range-charge').value;
+  const charge = +document.getElementById('range-charge').value;
 
   if (simulation) simulation.stop();
   simulation = d3.forceSimulation(nodes)
     .force('link', d3.forceLink(links).id(d => d.id).distance(strength * 0.6))
     .force('charge', d3.forceManyBody().strength(charge))
-    .force('center', d3.forceCenter(W / 2, H / 2))
+    .force('center', d3.forceCenter(W/2, H/2))
     .force('collide', d3.forceCollide(20));
 
-  // Links
   const link = g.append('g').selectAll('line')
-    .data(links).join('line')
-    .attr('class', 'link')
-    .attr('stroke-width', 1.2);
+    .data(links).join('line').attr('class','link').attr('stroke-width',1.2);
 
-  // Nodes
   const node = g.append('g').selectAll('g')
-    .data(nodes).join('g')
-    .attr('class', 'node')
+    .data(nodes).join('g').attr('class','node')
     .call(d3.drag()
-      .on('start', (event, d) => { if (!event.active) simulation.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
-      .on('drag',  (event, d) => { d.fx=event.x; d.fy=event.y; })
-      .on('end',   (event, d) => { if (!event.active) simulation.alphaTarget(0); d.fx=null; d.fy=null; }));
+      .on('start',(e,d)=>{ if(!e.active)simulation.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
+      .on('drag',(e,d)=>{ d.fx=e.x; d.fy=e.y; })
+      .on('end',(e,d)=>{ if(!e.active)simulation.alphaTarget(0); d.fx=null; d.fy=null; }));
 
   const radius = d => Math.max(6, Math.min(18, 4 + d.deg * 2));
+  node.append('circle').attr('r', radius).attr('fill', d=>color(d.deg)).attr('stroke','rgba(0,170,255,0.4)');
+  node.append('text').attr('dy', d=>radius(d)+12).attr('text-anchor','middle')
+    .text(d => d.id.length>16 ? d.id.slice(0,14)+'…' : d.id);
 
-  node.append('circle')
-    .attr('r', radius)
-    .attr('fill', d => color(d.deg))
-    .attr('stroke', 'rgba(0,170,255,0.4)');
-
-  node.append('text')
-    .attr('dy', d => radius(d) + 12)
-    .attr('text-anchor', 'middle')
-    .text(d => d.id.length > 16 ? d.id.slice(0,14)+'…' : d.id);
-
-  // Tooltip
   const tooltip = document.getElementById('tooltip');
-  node.on('mousemove', (event, d) => {
+  node.on('mousemove',(e,d)=>{
     const labelCol = document.getElementById('sel-label').value;
-    tooltip.style.display = '';
-    tooltip.style.left = (event.clientX + 14) + 'px';
-    tooltip.style.top  = (event.clientY - 10) + 'px';
+    tooltip.style.display=''; tooltip.style.left=(e.clientX+14)+'px'; tooltip.style.top=(e.clientY-10)+'px';
     document.getElementById('tt-title').textContent = d.id;
     let html = `<div class="tt-row">Connections: <span>${d.deg}</span></div>`;
     if (labelCol && d.row[labelCol]) html += `<div class="tt-row">${labelCol}: <span>${d.row[labelCol]}</span></div>`;
     document.getElementById('tt-body').innerHTML = html;
-  }).on('mouseleave', () => { tooltip.style.display = 'none'; });
+  }).on('mouseleave',()=>{ tooltip.style.display='none'; });
 
-  node.on('click', (event, d) => highlightNode(d.id));
+  node.on('click',(e,d)=>highlightNode(d.id));
 
-  simulation.on('tick', () => {
-    link
-      .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
-      .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
-    node.attr('transform', d => `translate(${d.x},${d.y})`);
+  simulation.on('tick',()=>{
+    link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y).attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
+    node.attr('transform', d=>`translate(${d.x},${d.y})`);
   });
 
-  // store refs for highlight
   svgEl._link = link;
   svgEl._node = node;
 }
@@ -637,10 +807,11 @@ document.getElementById('btn-clear').addEventListener('click', () => location.re
 
 // ── HELPERS ──
 function show(id) { document.getElementById(id).style.display = ''; }
-
 function setStatus(key, on, text) {
-  document.getElementById(`dot-${key}`).className = 'dot' + (on ? ' on' : '');
-  document.getElementById(`st-${key}-text`).textContent = text;
+  const dot = document.getElementById(`dot-${key}`);
+  const txt = document.getElementById(`st-${key}-text`);
+  if (dot) dot.className = 'dot' + (on ? ' on' : '');
+  if (txt) txt.textContent = text;
 }
 </script>
 </body>
