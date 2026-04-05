@@ -108,23 +108,12 @@ def _read_ref(name):
 @login_required
 def status():
     dd03l = _read_ref('dd03l.json')
-    dd04t = _read_ref('dd04t.json')
-    def info(d, row_key='rows'):
-        if not d: return None
-        return {'loaded': True,
-                'rows': d.get(row_key if isinstance(d.get(row_key), int) else '') or
-                        (len(d.get('rows', [])) if isinstance(d.get('rows'), list) else d.get('rows', 0)),
-                'uploadedAt': d.get('uploadedAt'),
-                'filename': d.get('filename')}
     dd03l_info = None
     if dd03l:
         dd03l_info = {'loaded': True, 'rows': len(dd03l.get('rows', [])),
                       'uploadedAt': dd03l.get('uploadedAt'), 'filename': dd03l.get('filename'),
                       'tabnames': dd03l.get('tabnames', [])}
-    dd04t_info = None
-    if dd04t:
-        dd04t_info = {'loaded': True, 'rows': dd04t.get('rows', 0),
-                      'uploadedAt': dd04t.get('uploadedAt'), 'filename': dd04t.get('filename')}
+    dd04t_info = _dd04t_info()
     tables = []
     tdir = os.path.join(DATA, 'transactional')
     for fn in sorted(os.listdir(tdir)):
@@ -182,14 +171,33 @@ def up_dd03l():
     return jsonify(ok=True, rows=len(slim), tabnames=len(tabnames),
                    merged=list(uploaded_tabnames))
 
+DD04T_DB = os.path.join(DATA, 'reference', 'dd04t.sqlite')
+
+def _dd04t_db():
+    c = sqlite3.connect(DD04T_DB)
+    c.execute('''CREATE TABLE IF NOT EXISTS dd04t (
+        rollname TEXT PRIMARY KEY,
+        SCRTEXT_M TEXT, SCRTEXT_L TEXT, SCRTEXT_S TEXT,
+        DDTEXT TEXT, REPTEXT TEXT)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS dd04t_meta (
+        k TEXT PRIMARY KEY, v TEXT)''')
+    return c
+
 @app.post('/api/upload/dd04t')
 @login_required
 def up_dd04t():
     f = request.files.get('file')
     if not f: return jsonify(error='no_file'), 400
+    # Stream straight into SQLite — constant memory regardless of file size.
+    if os.path.exists(DD04T_DB): os.remove(DD04T_DB)
+    c = _dd04t_db()
     wb = load_workbook(f, read_only=True, data_only=True)
-    lookup = {}
     eng = {'EN', 'E', 'en', 'e'}
+    seen = set()
+    n = 0
+    BATCH = 5000
+    batch = []
+    c.execute('BEGIN')
     for sn in wb.sheetnames:
         ws = wb[sn]
         headers = None; idx = {}
@@ -204,21 +212,55 @@ def up_dd04t():
             rn = r[idx['ROLLNAME']]
             if rn is None: continue
             rn = str(rn).strip()
-            if not rn or rn in lookup: continue
+            if not rn or rn in seen: continue
+            seen.add(rn)
             def cell(key):
                 i = idx.get(key, -1)
                 if i < 0: return ''
                 v = r[i]
                 return '' if v is None else str(v).strip()
-            lookup[rn] = {'SCRTEXT_M': cell('SCRTEXT_M'), 'SCRTEXT_L': cell('SCRTEXT_L'),
-                          'SCRTEXT_S': cell('SCRTEXT_S'), 'DDTEXT': cell('DDTEXT'),
-                          'REPTEXT': cell('REPTEXT')}
-    out = {'lookup': lookup, 'rows': len(lookup),
-           'uploadedAt': datetime.utcnow().isoformat() + 'Z',
-           'filename': f.filename}
-    with open(os.path.join(DATA, 'reference', 'dd04t.json'), 'w') as o:
-        json.dump(out, o)
-    return jsonify(ok=True, rows=len(lookup))
+            batch.append((rn, cell('SCRTEXT_M'), cell('SCRTEXT_L'),
+                          cell('SCRTEXT_S'), cell('DDTEXT'), cell('REPTEXT')))
+            n += 1
+            if len(batch) >= BATCH:
+                c.executemany('INSERT OR IGNORE INTO dd04t VALUES (?,?,?,?,?,?)', batch)
+                batch.clear()
+    if batch:
+        c.executemany('INSERT OR IGNORE INTO dd04t VALUES (?,?,?,?,?,?)', batch)
+    c.execute('INSERT OR REPLACE INTO dd04t_meta VALUES (?,?)',
+              ('uploadedAt', datetime.utcnow().isoformat() + 'Z'))
+    c.execute('INSERT OR REPLACE INTO dd04t_meta VALUES (?,?)', ('filename', f.filename))
+    c.execute('INSERT OR REPLACE INTO dd04t_meta VALUES (?,?)', ('rows', str(n)))
+    c.commit(); c.close()
+    return jsonify(ok=True, rows=n)
+
+def _dd04t_info():
+    if not os.path.exists(DD04T_DB): return None
+    c = sqlite3.connect(DD04T_DB)
+    try:
+        m = dict(c.execute('SELECT k,v FROM dd04t_meta').fetchall())
+    except sqlite3.OperationalError:
+        c.close(); return None
+    c.close()
+    return {'loaded': True, 'rows': int(m.get('rows', 0)),
+            'uploadedAt': m.get('uploadedAt'), 'filename': m.get('filename')}
+
+def _dd04t_lookup(rollnames, textfield):
+    """Return {rollname: text} for given set of rollnames."""
+    if not rollnames or not os.path.exists(DD04T_DB): return {}
+    if textfield not in ('SCRTEXT_M', 'SCRTEXT_L', 'SCRTEXT_S', 'DDTEXT', 'REPTEXT'):
+        textfield = 'SCRTEXT_M'
+    c = sqlite3.connect(DD04T_DB)
+    out = {}
+    rollnames = list(rollnames)
+    # Chunk the IN clause to stay under SQLite's variable limit (999)
+    for i in range(0, len(rollnames), 500):
+        chunk = rollnames[i:i+500]
+        q = f'SELECT rollname,{textfield} FROM dd04t WHERE rollname IN ({",".join("?"*len(chunk))})'
+        for rn, txt in c.execute(q, chunk):
+            if txt: out[rn] = txt
+    c.close()
+    return out
 
 FNAME_RE = re.compile(r'^([A-Z0-9]+)_([A-Z0-9]+)_(\d+)_(\d{8})\.xlsx?$', re.I)
 
@@ -269,16 +311,16 @@ def get_data(table):
     with open(p) as f: d = json.load(f)
     textfield = request.args.get('textfield', 'SCRTEXT_M')
     dd03l = _read_ref('dd03l.json') or {}
-    dd04t = _read_ref('dd04t.json') or {}
     f2r = {}
     for r in dd03l.get('rows', []):
         if r.get('TABNAME') == table and r.get('FIELDNAME'):
             f2r.setdefault(r['FIELDNAME'], r.get('ROLLNAME', ''))
-    lookup = dd04t.get('lookup', {})
+    needed_rolls = {v for v in f2r.values() if v}
+    txts = _dd04t_lookup(needed_rolls, textfield)
     rename = {}; matched = 0
     for c in d.get('columns', []):
         roll = f2r.get(c, '')
-        txt = lookup.get(roll, {}).get(textfield, '') if roll else ''
+        txt = txts.get(roll, '') if roll else ''
         if txt:
             rename[c] = f'{c} - {txt}'; matched += 1
         else:
