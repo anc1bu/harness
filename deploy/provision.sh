@@ -29,12 +29,12 @@ systemctl daemon-reload
 systemctl enable harness
 systemctl restart harness
 
-# nginx config (only first time — won't overwrite if already customized)
-if [ ! -L /etc/nginx/sites-enabled/harness.sapcons.nl ] || ! grep -q 'proxy_pass' /etc/nginx/sites-enabled/harness.sapcons.nl 2>/dev/null; then
-    cp deploy/nginx.conf /etc/nginx/sites-available/harness.sapcons.nl
-    ln -sf /etc/nginx/sites-available/harness.sapcons.nl /etc/nginx/sites-enabled/harness.sapcons.nl
-    nginx -t && systemctl reload nginx
-fi
+# nginx config — always sync and reload
+cp deploy/nginx.conf /etc/nginx/sites-available/harness.sapcons.nl
+ln -sf /etc/nginx/sites-available/harness.sapcons.nl /etc/nginx/sites-enabled/harness.sapcons.nl
+# Remove any conflicting default that listens on port 80 for this host
+rm -f /etc/nginx/sites-enabled/default
+nginx -t && systemctl reload nginx
 
 echo "✓ Harness provisioned"
 systemctl status harness --no-pager | head -5
