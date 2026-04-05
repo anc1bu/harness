@@ -17,7 +17,12 @@ jobs:
           key: ${{ secrets.VPS_KEY }}
           script: |
             set -e
+            if [ ! -d /var/www/harness/.git ]; then
+                mkdir -p /var/www
+                git clone https://github.com/anc1bu/harness.git /var/www/harness
+            fi
             cd /var/www/harness
-            git pull
+            git fetch --all
+            git reset --hard origin/main
             chmod +x deploy/provision.sh
             ./deploy/provision.sh
