@@ -6,6 +6,25 @@ from datetime import datetime, timedelta
 from functools import wraps
 import sqlite3, json, os, re, secrets
 
+# Map SAP SE16N description headers for DD03L to their technical field names
+_DD03L_HEADER_MAP = {
+    'Table Name': 'TABNAME', 'Field Name': 'FIELDNAME',
+    'Activation State': 'AS4LOCAL', 'Version': 'AS4VERS',
+    'Table position': 'POSITION', 'Table position.1': 'DBPOSITION',
+    'Key field': 'KEYFLAG', 'Required Field': 'MANDATORY',
+    'Data element': 'ROLLNAME', 'Check table': 'CHECKTABLE',
+    'Admin. field': 'ADMINFIELD', 'ABAP type': 'INTTYPE',
+    'Internal Length': 'INTLEN', 'Reference table': 'REFTABLE',
+    'Name of include': 'PRECFIELD', 'Ref. field': 'REFFIELD',
+    'Check module': 'CONROUT', 'Force NOT NULL': 'NOTNULL',
+    'Data Type': 'DATATYPE', 'No. of Characters': 'LENG',
+    'Decimal Places': 'DECIMALS', 'Domain name': 'DOMNAME',
+    'Origin': 'SHLPORIGIN', 'Table': 'TABLETYPE', 'Depth': 'DEPTH',
+    'Component Type': 'COMPTYPE', 'Type of Object Referenced': 'REFTYPE',
+    'Text Lang.': 'LANGUFLAG', 'Anonymous': 'ANONYMOUS',
+    'Output': 'OUTPUTSTYLE', 'SRS Identifier': 'SRS_ID',
+}
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get('HARNESS_DATA', os.path.join(HERE, 'data'))
 os.makedirs(os.path.join(DATA, 'reference'), exist_ok=True)
@@ -114,6 +133,7 @@ def status():
                       'uploadedAt': dd03l.get('uploadedAt'), 'filename': dd03l.get('filename'),
                       'tabnames': dd03l.get('tabnames', [])}
     dd04t_info = _dd04t_info()
+    dd08l_info = _dd08l_info()
     tables = []
     tdir = os.path.join(DATA, 'transactional')
     for fn in sorted(os.listdir(tdir)):
@@ -124,7 +144,7 @@ def status():
                            'columns': len(d.get('columns', [])),
                            'filename': d.get('filename'),
                            'uploadedAt': d.get('uploadedAt')})
-    return jsonify(dd03l=dd03l_info, dd04t=dd04t_info, tables=tables)
+    return jsonify(dd03l=dd03l_info, dd04t=dd04t_info, dd08l=dd08l_info, tables=tables)
 
 # ───────────── UPLOADS ─────────────
 def _parse_wb(fileobj):
@@ -147,15 +167,16 @@ def up_dd03l():
     f = request.files.get('file')
     if not f: return jsonify(error='no_file'), 400
     rows, _ = _parse_wb(f)
+    # Normalize description headers to technical names if needed
+    rows = [{_DD03L_HEADER_MAP.get(k, k): v for k, v in r.items()} for r in rows]
     slim = []
     for r in rows:
         tn = str(r.get('TABNAME', '')).strip()
         fn = str(r.get('FIELDNAME', '')).strip()
         if not tn or not fn: continue
-        slim.append({'TABNAME': tn, 'FIELDNAME': fn,
-                     'ROLLNAME': str(r.get('ROLLNAME', '')).strip(),
-                     'KEYFLAG': str(r.get('KEYFLAG', '')).strip(),
-                     'POSITION': r.get('POSITION', '')})
+        # Store all columns from the uploaded DD03L row
+        clean = {k: (str(v).strip() if v is not None else '') for k, v in r.items()}
+        slim.append(clean)
     uploaded_tabnames = {r['TABNAME'] for r in slim}
     # Merge: keep rows for tables not in this upload, replace rows for tables that ARE
     existing = _read_ref('dd03l.json')
@@ -168,6 +189,7 @@ def up_dd03l():
            'filename': f.filename}
     with open(os.path.join(DATA, 'reference', 'dd03l.json'), 'w') as o:
         json.dump(out, o)
+    _reenrich_all()
     return jsonify(ok=True, rows=len(slim), tabnames=len(tabnames),
                    merged=list(uploaded_tabnames))
 
@@ -236,6 +258,7 @@ def up_dd04t():
             c.execute('INSERT OR REPLACE INTO dd04t_meta VALUES (?,?)', ('rows', str(n)))
             c.commit(); c.close()
             os.replace(tmp_db, DD04T_DB)
+            _reenrich_all()
             yield json.dumps({'event': 'done', 'ok': True, 'rows': n}) + '\n'
         except Exception as e:
             yield json.dumps({'event': 'error', 'error': str(e)}) + '\n'
@@ -276,6 +299,78 @@ def _dd04t_lookup(rollnames, textfield):
     c.close()
     return out
 
+# ───────────── ENRICHMENT HELPERS ─────────────
+def _enrich_columns(table, columns, textfield='SCRTEXT_M'):
+    """Return {fieldname: 'FIELDNAME - description'} for all resolvable columns."""
+    dd03l = _read_ref('dd03l.json') or {}
+    f2r = {}
+    for r in dd03l.get('rows', []):
+        if r.get('TABNAME') == table and r.get('FIELDNAME'):
+            f2r.setdefault(r['FIELDNAME'], r.get('ROLLNAME', ''))
+    needed_rolls = {v for v in f2r.values() if v}
+    txts = _dd04t_lookup(needed_rolls, textfield)
+    enriched = {}
+    for c in columns:
+        roll = f2r.get(c, '')
+        txt = txts.get(roll, '') if roll else ''
+        if txt:
+            enriched[c] = f'{c} - {txt}'
+    return enriched
+
+def _reenrich_all():
+    """Re-run enrichment for all stored transactional tables, updating resolved entries."""
+    tdir = os.path.join(DATA, 'transactional')
+    for fn in os.listdir(tdir):
+        if not fn.endswith('.json'): continue
+        p = os.path.join(tdir, fn)
+        try:
+            with open(p) as f:
+                d = json.load(f)
+            table = d.get('table', '')
+            cols = d.get('columns', [])
+            if not table or not cols: continue
+            new_enriched = _enrich_columns(table, cols)
+            existing = dict(d.get('enriched_columns', {}))
+            existing.update(new_enriched)  # overwrite with fresh; keeps blanks not yet resolvable
+            d['enriched_columns'] = existing
+            with open(p, 'w') as f:
+                json.dump(d, f)
+        except Exception:
+            pass
+
+# ───────────── DD08L ─────────────
+def _dd08l_info():
+    dd08l = _read_ref('dd08l.json')
+    if not dd08l: return None
+    rows = dd08l.get('rows', [])
+    if not rows: return None
+    return {'loaded': True, 'rows': len(rows),
+            'uploadedAt': dd08l.get('uploadedAt'), 'filename': dd08l.get('filename')}
+
+def _dd08l_lookup(checktable):
+    """Return the text-table TABNAME for a given check table (FRKART=TEXT), or None."""
+    dd08l = _read_ref('dd08l.json')
+    if not dd08l: return None
+    for r in dd08l.get('rows', []):
+        if r.get('CHECKTABLE') == checktable and r.get('FRKART') == 'TEXT':
+            return r.get('TABNAME', '').strip() or None
+    return None
+
+@app.post('/api/upload/dd08l')
+@login_required
+def up_dd08l():
+    f = request.files.get('file')
+    if not f: return jsonify(error='no_file'), 400
+    rows, _ = _parse_wb(f)
+    clean_rows = [{k: (str(v).strip() if v is not None else '') for k, v in r.items()}
+                  for r in rows]
+    out = {'rows': clean_rows,
+           'uploadedAt': datetime.utcnow().isoformat() + 'Z',
+           'filename': f.filename}
+    with open(os.path.join(DATA, 'reference', 'dd08l.json'), 'w') as o:
+        json.dump(out, o)
+    return jsonify(ok=True, rows=len(clean_rows))
+
 FNAME_RE = re.compile(r'^([A-Z0-9]+)_([A-Z0-9]+)_(\d+)_(\d{8})\.xlsx?$', re.I)
 
 @app.post('/api/upload/trans')
@@ -291,12 +386,6 @@ def up_trans():
                                    m.group(3), m.group(4))
     try: datetime.strptime(date, '%Y%m%d')
     except ValueError: return jsonify(error='bad_date'), 400
-    dd03l = _read_ref('dd03l.json')
-    if not dd03l:
-        return jsonify(error='dd03l_missing'), 400
-    if table not in dd03l.get('tabnames', []):
-        return jsonify(error='table_not_in_dd03l', table=table,
-                       hint='Re-upload DD03L with this table'), 400
     wb = load_workbook(f, read_only=True, data_only=True)
     ws = wb[wb.sheetnames[0]]
     headers = None; rows = []
@@ -306,10 +395,25 @@ def up_trans():
             continue
         if all(v is None or v == '' for v in r): continue
         rows.append({h: ('' if v is None else v) for h, v in zip(headers, r)})
+    # Column validation: ≥50% of headers must match DD03L field names for this table
+    dd03l = _read_ref('dd03l.json')
+    tbl_fields = {r['FIELDNAME'] for r in (dd03l or {}).get('rows', [])
+                  if r.get('TABNAME') == table and r.get('FIELDNAME')}
+    non_empty_headers = [h for h in headers if h]
+    matched_headers = [h for h in non_empty_headers if h in tbl_fields]
+    unmatched_headers = [h for h in non_empty_headers if h not in tbl_fields]
+    if not non_empty_headers or len(matched_headers) / len(non_empty_headers) < 0.95:
+        return jsonify(error='non_technical_columns', table=table,
+                       matched=len(matched_headers), total=len(non_empty_headers),
+                       unmatched_sample=unmatched_headers[:10],
+                       hint=f'Column headers must be SAP technical field names. '
+                            f'Re-export from SE16N using technical column names.'), 400
+    enriched_columns = _enrich_columns(table, headers)
     out = {'table': table, 'system': system, 'client': client, 'date': date,
            'filename': f.filename,
            'uploadedAt': datetime.utcnow().isoformat() + 'Z',
-           'columns': headers, 'rows': rows}
+           'columns': headers, 'rows': rows,
+           'enriched_columns': enriched_columns}
     with open(os.path.join(DATA, 'transactional', f'{table}.json'), 'w') as o:
         json.dump(out, o)
     return jsonify(ok=True, table=table, rows=len(rows), columns=len(headers),
@@ -323,29 +427,82 @@ def get_data(table):
     p = os.path.join(DATA, 'transactional', f'{table}.json')
     if not os.path.exists(p): return jsonify(error='not_found'), 404
     with open(p) as f: d = json.load(f)
-    textfield = request.args.get('textfield', 'SCRTEXT_M')
-    dd03l = _read_ref('dd03l.json') or {}
-    f2r = {}
-    for r in dd03l.get('rows', []):
-        if r.get('TABNAME') == table and r.get('FIELDNAME'):
-            f2r.setdefault(r['FIELDNAME'], r.get('ROLLNAME', ''))
-    needed_rolls = {v for v in f2r.values() if v}
-    txts = _dd04t_lookup(needed_rolls, textfield)
-    rename = {}; matched = 0
-    for c in d.get('columns', []):
-        roll = f2r.get(c, '')
-        txt = txts.get(roll, '') if roll else ''
-        if txt:
-            rename[c] = f'{c} - {txt}'; matched += 1
-        else:
-            rename[c] = c
-    cols = [rename[c] for c in d.get('columns', [])]
-    rows = [{rename[c]: r.get(c, '') for c in d.get('columns', [])}
+    enriched = d.get('enriched_columns')
+    if enriched is None:
+        # Legacy tables (uploaded before auto-enrichment): compute on the fly
+        textfield = request.args.get('textfield', 'SCRTEXT_M')
+        enriched = _enrich_columns(table, d.get('columns', []), textfield)
+    cols = [enriched.get(c, c) for c in d.get('columns', [])]
+    rows = [{enriched.get(c, c): r.get(c, '') for c in d.get('columns', [])}
             for r in d.get('rows', [])]
+    matched = sum(1 for c in d.get('columns', []) if c in enriched)
     return jsonify(table=table, columns=cols, rows=rows,
                    matched=matched, total=len(d.get('columns', [])),
                    filename=d.get('filename'), uploadedAt=d.get('uploadedAt'),
                    system=d.get('system'), client=d.get('client'), date=d.get('date'))
+
+
+@app.post('/api/data/<table>/describe')
+@login_required
+def describe_column(table):
+    table = table.upper()
+    d_req = request.get_json(silent=True) or {}
+    field = str(d_req.get('field', '')).strip().upper()
+    if not field:
+        return jsonify(error='no_field'), 400
+
+    p = os.path.join(DATA, 'transactional', f'{table}.json')
+    if not os.path.exists(p):
+        return jsonify(error='not_found'), 404
+
+    # Step 1: look up CHECKTABLE from DD03L
+    dd03l = _read_ref('dd03l.json') or {}
+    checktable = ''
+    for r in dd03l.get('rows', []):
+        if r.get('TABNAME') == table and r.get('FIELDNAME') == field:
+            checktable = str(r.get('CHECKTABLE', '')).strip()
+            break
+    if not checktable:
+        return jsonify(error='no_checktable',
+                       hint=f'No check table defined for {table}.{field} in DD03L'), 400
+
+    # Step 2: find text table from DD08L
+    text_table = _dd08l_lookup(checktable)
+    if not text_table:
+        dd08l = _read_ref('dd08l.json')
+        if not dd08l:
+            return jsonify(error='dd08l_missing',
+                           hint='Upload DD08L to enable value description lookup'), 400
+        return jsonify(error='no_text_table',
+                       hint=f'No text table (FRKART=TEXT) found in DD08L for check table {checktable}'), 400
+
+    # Step 3: load text table rows (warn if not uploaded yet)
+    tt_path = os.path.join(DATA, 'transactional', f'{text_table}.json')
+    warning = None
+    values = {}
+    if not os.path.exists(tt_path):
+        warning = f'Upload {text_table} as a transactional table to get descriptions for {field}'
+    else:
+        with open(tt_path) as f:
+            tt_data = json.load(f)
+        tt_cols = tt_data.get('columns', [])
+        has_spras = 'SPRAS' in tt_cols
+        for row in tt_data.get('rows', []):
+            if has_spras:
+                lang = str(row.get('SPRAS', '')).strip().upper()
+                if lang not in ('EN', 'E'):
+                    continue
+            val = str(row.get(field, '')).strip()
+            vtext = str(row.get('VTEXT', '')).strip()
+            if val and vtext:
+                values[val] = vtext
+
+    return jsonify(field=field,
+                   description_column=f'{field} - Description',
+                   checktable=checktable,
+                   text_table=text_table,
+                   values=values,
+                   warning=warning)
 
 @app.delete('/api/data/<table>')
 @login_required

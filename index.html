@@ -92,6 +92,19 @@
     }
     .ref-slot:hover .rs-replace { color: var(--accent); border-color: var(--accent); }
 
+    #trans-list { margin-bottom: 6px; }
+    #trans-list table { width: 100%; border-collapse: collapse; font-size: 10px; }
+    #trans-list thead th {
+      text-align: left; padding: 4px 6px; letter-spacing: 1px; color: var(--text-dim);
+      border-bottom: 1px solid var(--border); font-weight: normal; text-transform: uppercase;
+    }
+    #trans-list tbody tr { cursor: pointer; transition: background .12s; }
+    #trans-list tbody tr:hover { background: rgba(74,222,128,0.06); }
+    #trans-list tbody tr.active { background: rgba(74,222,128,0.1); }
+    #trans-list tbody tr.active td { color: var(--accent2); }
+    #trans-list td { padding: 5px 6px; border-bottom: 1px solid rgba(255,255,255,0.04); }
+    #trans-list td:last-child { color: var(--accent); text-align: right; }
+
     .upload-zone {
       border: 2px dashed var(--border); border-radius: 6px;
       padding: 18px 12px; text-align: center; cursor: pointer;
@@ -132,6 +145,31 @@
     .btn:disabled:hover { background: transparent; box-shadow: none; }
 
     .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
+
+    .col-list {
+      max-height: 260px; overflow-y: auto; border: 1px solid var(--border);
+      border-radius: 4px; background: var(--bg);
+    }
+    .col-list-item {
+      padding: 6px 10px; font-size: 11px; border-bottom: 1px solid rgba(255,255,255,0.03);
+      display: flex; gap: 8px; align-items: baseline;
+    }
+    .col-list-item:last-child { border-bottom: none; }
+    .col-list-item:hover { background: rgba(74,222,128,0.06); }
+    .col-list-item .cli-tech {
+      font-family: 'SF Mono','Consolas',monospace; color: var(--accent);
+      min-width: 110px; font-size: 11px;
+    }
+    .col-list-item .cli-desc { color: var(--text-dim); font-size: 11px; flex: 1; }
+    .col-list-item .cli-unmatched { color: var(--text-dim); font-style: italic; }
+    .col-list-empty { padding: 14px; color: var(--text-dim); font-size: 11px; text-align: center; }
+    .cli-describe {
+      background: transparent; border: 1px solid var(--border); color: var(--text-dim);
+      font-size: 11px; line-height: 1; cursor: pointer; padding: 1px 5px; border-radius: 3px;
+      font-family: inherit; transition: all .15s; flex-shrink: 0; margin-left: auto;
+    }
+    .cli-describe:hover { border-color: var(--accent); color: var(--accent); }
+    .col-list-count { font-size: 10px; color: var(--text-dim); margin-top: 4px; letter-spacing: 1px; }
     .stat-box {
       background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
       padding: 8px 6px; text-align: center;
@@ -184,13 +222,24 @@
       pointer-events: none; z-index: 1000;
     }
 
-    #toast {
-      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
-      background: var(--panel); border: 1px solid var(--accent); color: var(--text);
-      padding: 10px 18px; border-radius: 4px; font-size: 11px; letter-spacing: 1px;
-      box-shadow: var(--glow); z-index: 1001; display: none; max-width: 80vw;
+    #modal-overlay {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+      z-index: 1100; align-items: center; justify-content: center;
     }
-    #toast.err { border-color: var(--danger); box-shadow: 0 0 12px rgba(224,96,96,0.32); }
+    #modal-overlay.show { display: flex; }
+    #modal-box {
+      background: var(--panel); border: 1px solid var(--accent); border-radius: 4px;
+      padding: 24px 28px; max-width: 480px; width: 90vw;
+      box-shadow: var(--glow); color: var(--text); font-size: 12px; letter-spacing: .5px;
+    }
+    #modal-box.err { border-color: var(--danger); box-shadow: 0 0 16px rgba(224,96,96,0.35); }
+    #modal-msg { margin-bottom: 18px; line-height: 1.6; white-space: pre-wrap; }
+    #modal-ok {
+      display: block; margin-left: auto; padding: 6px 22px;
+      background: transparent; border: 1px solid var(--accent); color: var(--accent);
+      border-radius: 3px; cursor: pointer; font-size: 11px; letter-spacing: 1px;
+    }
+    #modal-ok:hover { background: var(--accent); color: var(--bg); }
   </style>
 </head>
 <body>
@@ -200,6 +249,7 @@
   <div class="status-row">
     <div><span class="dot" id="dot-dd03l"></span><span id="st-dd03l">DD03L: —</span></div>
     <div><span class="dot" id="dot-dd04t"></span><span id="st-dd04t">DD04T: —</span></div>
+    <div><span class="dot" id="dot-dd08l"></span><span id="st-dd08l">DD08L: —</span></div>
     <div><span class="dot" id="dot-table"></span><span id="st-table">TABLE: —</span></div>
     <div><span class="dot" id="dot-nodes"></span><span id="st-nodes">0 NODES</span></div>
     <div><span class="dot" id="dot-edges"></span><span id="st-edges">0 LINKS</span></div>
@@ -216,80 +266,15 @@
     <div class="panel-header"><div class="ph-dot"></div>CONTROL PANEL</div>
     <div class="panel-body">
 
-      <div class="ctrl-label" style="margin-bottom:6px">Reference Tables (Server)</div>
-      <div class="ref-slot" id="slot-dd03l">
-        <div class="rs-light"></div>
-        <div class="rs-main">
-          <div class="rs-title">DD03L · Table Fields</div>
-          <div class="rs-sub" id="sub-dd03l">not loaded</div>
-        </div>
-        <div class="rs-replace">Upload</div>
-        <input type="file" id="file-dd03l" accept=".xlsx,.xls" hidden>
-      </div>
-      <div class="ref-slot" id="slot-dd04t">
-        <div class="rs-light"></div>
-        <div class="rs-main">
-          <div class="rs-title">DD04T · Data Element Texts</div>
-          <div class="rs-sub" id="sub-dd04t">not loaded</div>
-        </div>
-        <div class="rs-replace">Upload</div>
-        <input type="file" id="file-dd04t" accept=".xlsx,.xls" hidden>
-      </div>
-
-      <div class="ctrl-label" style="margin:14px 0 6px">Transactional Data</div>
+      <div class="ctrl-label" style="margin-bottom:8px">Configuration Tables</div>
       <div class="upload-zone" id="zone-trans">
         <div class="uz-icon">⬆</div>
-        <div>Drop .xlsx here</div>
+        <div>Drop .xlsx here or click to upload</div>
         <div class="uz-hint">TABLE_SYSTEM_CLIENT_YYYYMMDD.xlsx</div>
         <input type="file" id="file-trans" accept=".xlsx,.xls" hidden>
       </div>
-
-      <div class="ctrl-section" id="section-table" style="display:none">
-        <div class="ctrl-label">Stored Tables</div>
-        <select id="sel-table"></select>
-      </div>
-
-      <div class="ctrl-section" id="section-textfield">
-        <div class="ctrl-label">Label Field</div>
-        <select id="sel-textfield">
-          <option value="SCRTEXT_M" selected>SCRTEXT_M · medium</option>
-          <option value="SCRTEXT_L">SCRTEXT_L · long</option>
-          <option value="SCRTEXT_S">SCRTEXT_S · short</option>
-          <option value="DDTEXT">DDTEXT</option>
-          <option value="REPTEXT">REPTEXT</option>
-        </select>
-      </div>
-
-      <button class="btn primary" id="btn-load" style="display:none">▶ LOAD &amp; RENAME</button>
-
-      <div class="ctrl-section" id="section-cols" style="display:none">
-        <div class="ctrl-label">Source Node Column</div>
-        <select id="sel-source"></select>
-        <div class="ctrl-label" style="margin-top:10px">Target Node Column</div>
-        <select id="sel-target"></select>
-        <div class="ctrl-label" style="margin-top:10px">Tooltip Label Column</div>
-        <select id="sel-label"><option value="">— none —</option></select>
-      </div>
-
-      <div class="ctrl-section" id="section-graph" style="display:none">
-        <div class="ctrl-label">Link Strength</div>
-        <input type="range" id="range-strength" min="50" max="500" value="150" />
-        <div class="ctrl-label" style="margin-top:8px">Node Charge</div>
-        <input type="range" id="range-charge" min="-500" max="-20" value="-180" />
-      </div>
-
-      <div class="stat-grid" id="section-stats" style="display:none">
-        <div class="stat-box"><div class="sv" id="stat-rows">0</div><div class="sl">Rows</div></div>
-        <div class="stat-box"><div class="sv" id="stat-nodes">0</div><div class="sl">Nodes</div></div>
-        <div class="stat-box"><div class="sv" id="stat-links">0</div><div class="sl">Links</div></div>
-        <div class="stat-box"><div class="sv" id="stat-cols">0</div><div class="sl">Columns</div></div>
-      </div>
-
-      <div id="section-actions" style="display:none">
-        <button class="btn" id="btn-render">⟳ RENDER GRAPH</button>
-        <button class="btn" id="btn-reset-zoom">⤢ FIT VIEW</button>
-        <button class="btn danger" id="btn-delete">✕ DELETE TABLE</button>
-      </div>
+      <div id="trans-list"></div>
+      <select id="sel-table" style="display:none"></select>
 
     </div>
   </div>
@@ -300,7 +285,7 @@
       <div class="empty-state" id="graph-empty">
         <div class="es-icon">◈</div>
         <div id="empty-msg">Load a table to begin</div>
-        <div style="opacity:.5;font-size:10px">Upload transactional file, then LOAD &amp; RENAME</div>
+        <div style="opacity:.5;font-size:10px">Upload transactional file to begin</div>
       </div>
       <svg id="graph-svg" style="display:none"></svg>
     </div>
@@ -322,17 +307,25 @@
   <div class="tt-title" id="tt-title"></div>
   <div id="tt-body"></div>
 </div>
-<div id="toast"></div>
+<div id="modal-overlay">
+  <div id="modal-box">
+    <div id="modal-msg"></div>
+    <button id="modal-ok">OK</button>
+  </div>
+</div>
 
 <script>
 function tick() { document.getElementById('clock').textContent = new Date().toTimeString().slice(0,8); }
 tick(); setInterval(tick, 1000);
 
 function toast(msg, isErr=false) {
-  const t = document.getElementById('toast');
-  t.textContent = msg; t.className = isErr ? 'err' : '';
-  t.style.display = 'block';
-  clearTimeout(toast._t); toast._t = setTimeout(() => t.style.display='none', 4000);
+  const overlay = document.getElementById('modal-overlay');
+  const box = document.getElementById('modal-box');
+  const msgEl = document.getElementById('modal-msg');
+  msgEl.textContent = msg;
+  box.className = isErr ? 'err' : '';
+  overlay.classList.add('show');
+  document.getElementById('modal-ok').onclick = () => overlay.classList.remove('show');
 }
 
 let rows = [], columns = [], simulation = null;
@@ -356,97 +349,40 @@ async function refreshStatus() {
   if (!r.ok) return;
   const s = await r.json();
   serverStatus = s;
-  const slot3 = document.getElementById('slot-dd03l');
-  if (s.dd03l) {
-    slot3.classList.add('loaded');
-    document.getElementById('sub-dd03l').textContent =
-      `${s.dd03l.rows} rows · ${s.dd03l.tabnames.length} tables · ${s.dd03l.filename}`;
-    setDot('dd03l', true, `DD03L: ${s.dd03l.rows}r`);
-  } else {
-    slot3.classList.remove('loaded');
-    document.getElementById('sub-dd03l').textContent = 'not loaded';
-    setDot('dd03l', false, 'DD03L: —');
-  }
-  const slot4 = document.getElementById('slot-dd04t');
-  if (s.dd04t) {
-    slot4.classList.add('loaded');
-    document.getElementById('sub-dd04t').textContent =
-      `${s.dd04t.rows} entries · ${s.dd04t.filename}`;
-    setDot('dd04t', true, `DD04T: ${s.dd04t.rows}r`);
-  } else {
-    slot4.classList.remove('loaded');
-    document.getElementById('sub-dd04t').textContent = 'not loaded';
-    setDot('dd04t', false, 'DD04T: —');
-  }
+  setDot('dd03l', !!s.dd03l, s.dd03l ? `DD03L: ${s.dd03l.rows}r` : 'DD03L: —');
+  setDot('dd04t', !!s.dd04t, s.dd04t ? `DD04T: ${s.dd04t.rows}r` : 'DD04T: —');
+  setDot('dd08l', !!s.dd08l, s.dd08l ? `DD08L: ${s.dd08l.rows}r` : 'DD08L: —');
+  const prevTable = document.getElementById('sel-table').value;
   const sel = document.getElementById('sel-table');
-  const section = document.getElementById('section-table');
+  const list = document.getElementById('trans-list');
   if (s.tables && s.tables.length) {
-    sel.innerHTML = s.tables.map(t =>
-      `<option value="${t.name}">${t.name} · ${t.rows}r · ${t.date||''}</option>`).join('');
-    section.style.display = '';
-    document.getElementById('btn-load').style.display = '';
+    sel.innerHTML = s.tables.map(t => `<option value="${t.name}">${t.name}</option>`).join('');
+    if (prevTable && [...sel.options].some(o => o.value === prevTable)) sel.value = prevTable;
+    list.innerHTML = `<table>
+      <thead><tr><th>Table</th><th>System</th><th>Client</th><th>Date</th><th>Entries</th></tr></thead>
+      <tbody>${s.tables.map(t => `
+        <tr data-table="${t.name}" class="${currentTable === t.name ? 'active' : ''}">
+          <td>${t.name}</td><td>${t.system||'—'}</td><td>${t.client||'—'}</td>
+          <td>${t.date||'—'}</td><td>${t.rows}</td>
+        </tr>`).join('')}
+      </tbody></table>`;
+    list.querySelectorAll('tbody tr').forEach(row => {
+      row.addEventListener('click', () => {
+        sel.value = row.dataset.table;
+        loadAndRender();
+      });
+    });
   } else {
-    section.style.display = 'none';
-    document.getElementById('btn-load').style.display = 'none';
+    sel.innerHTML = '';
+    list.innerHTML = '';
   }
 }
 
-function hookRefSlot(type) {
-  const slot = document.getElementById(`slot-${type}`);
-  const input = document.getElementById(`file-${type}`);
-  slot.addEventListener('click', () => input.click());
-  input.addEventListener('change', async e => {
-    const f = e.target.files[0]; if (!f) return;
-    await uploadRef(type, f);
-    e.target.value = '';
-  });
-}
-['dd03l','dd04t'].forEach(hookRefSlot);
 
-async function uploadRef(type, file) {
-  const sub = document.getElementById(`sub-${type}`);
-  sub.textContent = `uploading ${(file.size/1048576).toFixed(1)} MB…`;
-  const fd = new FormData(); fd.append('file', file);
-  try {
-    const r = await fetch(`/api/upload/${type}`, { method: 'POST', body: fd });
-    // DD04T streams NDJSON progress; DD03L returns plain JSON.
-    const ct = r.headers.get('content-type') || '';
-    if (ct.includes('ndjson')) {
-      const reader = r.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '', last = null;
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let lines = buf.split('\n'); buf = lines.pop();
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const evt = JSON.parse(line);
-            last = evt;
-            if (evt.event === 'progress') sub.textContent = `processing ${evt.rows.toLocaleString()} rows…`;
-            else if (evt.event === 'error') { toast('upload error: ' + evt.error, true); sub.textContent = 'upload failed'; return; }
-          } catch(_) {}
-        }
-      }
-      if (last && last.event === 'done') { toast(`${type.toUpperCase()} loaded: ${last.rows} rows`); await refreshStatus(); }
-      else { toast('upload failed', true); sub.textContent = 'upload failed'; }
-      return;
-    }
-    const d = await r.json();
-    if (!r.ok) { toast(d.error || 'upload failed', true); sub.textContent = 'upload failed'; return; }
-    toast(`${type.toUpperCase()} loaded: ${d.rows} rows`);
-    await refreshStatus();
-  } catch (e) {
-    toast('upload error: ' + e.message, true);
-  }
-}
-
-const zone = document.getElementById('zone-trans');
 const fileTrans = document.getElementById('file-trans');
 const FNAME_RE = /^([A-Z0-9]+)_([A-Z0-9]+)_(\d+)_(\d{8})\.xlsx?$/i;
 
+const zone = document.getElementById('zone-trans');
 zone.addEventListener('click', () => fileTrans.click());
 zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
 zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
@@ -463,64 +399,41 @@ async function uploadTrans(file) {
   if (!FNAME_RE.test(file.name)) {
     toast(`bad filename — expected TABLE_SYSTEM_CLIENT_YYYYMMDD.xlsx`, true); return;
   }
-  if (!serverStatus || !serverStatus.dd03l) {
-    toast('upload DD03L first', true); return;
-  }
-  const tbl = file.name.split('_')[0].toUpperCase();
-  if (!serverStatus.dd03l.tabnames.includes(tbl)) {
-    toast(`${tbl} not in DD03L — please re-upload DD03L with this table`, true); return;
-  }
   toast(`uploading ${file.name}…`);
   const fd = new FormData(); fd.append('file', file);
   try {
     const r = await fetch('/api/upload/trans', { method: 'POST', body: fd });
     const d = await r.json();
-    if (!r.ok) { toast(`error: ${d.error}${d.hint?' — '+d.hint:''}`, true); return; }
-    toast(`${d.table}: ${d.rows} rows stored`);
+    if (!r.ok) {
+      if (d.error === 'non_technical_columns') {
+        toast(`rejected: only ${d.matched}/${d.total} columns are valid ${d.table} field names. ` +
+              `Unknown: ${(d.unmatched_sample||[]).join(', ')}. Re-export with technical names.`, true);
+      } else {
+        toast(`error: ${d.error}${d.hint?' — '+d.hint:''}`, true);
+      }
+      return;
+    }
+    toast(`${d.table}: ${d.rows} rows · ${d.matched}/${d.matched+d.unmatched} cols matched`);
     await refreshStatus();
     document.getElementById('sel-table').value = d.table;
+    loadAndRender();
   } catch (e) { toast('upload error: '+e.message, true); }
 }
 
-document.getElementById('btn-load').addEventListener('click', loadAndRender);
 async function loadAndRender() {
   const table = document.getElementById('sel-table').value;
-  const tf = document.getElementById('sel-textfield').value;
   if (!table) return;
-  toast(`loading ${table}…`);
-  const r = await fetch(`/api/data/${table}?textfield=${tf}`);
+  const r = await fetch(`/api/data/${table}`);
   if (!r.ok) { toast('load failed', true); return; }
   const d = await r.json();
   rows = d.rows; columns = d.columns; currentTable = table;
-  toast(`${table}: ${d.matched}/${d.total} columns matched · ${rows.length} rows`);
-  setDot('table', true, `TABLE: ${table}`);
-
-  ['sel-source','sel-target','sel-label'].forEach(id => {
-    const sel = document.getElementById(id);
-    const hasNone = id === 'sel-label';
-    sel.innerHTML = hasNone ? '<option value="">— none —</option>' : '';
-    columns.forEach(c => {
-      const opt = document.createElement('option');
-      opt.value = c; opt.textContent = c; sel.appendChild(opt);
-    });
+  document.querySelectorAll('#trans-list tbody tr').forEach(row => {
+    row.classList.toggle('active', row.dataset.table === table);
   });
-  if (document.getElementById('sel-target').options.length > 1)
-    document.getElementById('sel-target').selectedIndex = 1;
-
-  document.getElementById('stat-rows').textContent = rows.length;
-  document.getElementById('stat-cols').textContent = columns.length;
-  show('section-cols'); show('section-graph'); show('section-stats'); show('section-actions');
-  renderTable(); renderGraph();
+  setDot('table', true, `TABLE: ${table}`);
+  renderTable();
 }
 
-document.getElementById('btn-delete').addEventListener('click', async () => {
-  if (!currentTable) return;
-  if (!confirm(`Delete stored data for ${currentTable}?`)) return;
-  await fetch(`/api/data/${currentTable}`, { method: 'DELETE' });
-  toast(`${currentTable} deleted`);
-  currentTable = null;
-  location.reload();
-});
 
 function renderTable() {
   document.getElementById('table-empty').style.display = 'none';
@@ -539,107 +452,45 @@ function renderTable() {
     html += `<tr><td colspan="${columns.length}" style="text-align:center;color:var(--text-dim);padding:10px">… ${rows.length-200} more rows</td></tr>`;
   html += '</tbody></table>';
   wrap.innerHTML = html;
-  wrap.querySelectorAll('tbody tr[data-i]').forEach(tr => {
-    tr.addEventListener('click', () => {
-      wrap.querySelectorAll('tbody tr').forEach(t=>t.classList.remove('selected'));
-      tr.classList.add('selected');
-      highlightNode(rows[+tr.dataset.i][document.getElementById('sel-source').value]);
-    });
-  });
 }
 
-function renderGraph() {
-  const src = document.getElementById('sel-source').value;
-  const tgt = document.getElementById('sel-target').value;
-  if (!src || !tgt) return;
-  document.getElementById('graph-empty').style.display = 'none';
-  const svgEl = document.getElementById('graph-svg');
-  svgEl.style.display = '';
-
-  const nodeMap = new Map(), links = [];
-  rows.forEach(r => {
-    const s = String(r[src] ?? '').trim(), t = String(r[tgt] ?? '').trim();
-    if (!s || !t || s === t) return;
-    if (!nodeMap.has(s)) nodeMap.set(s, {id:s, deg:0, row:r});
-    if (!nodeMap.has(t)) nodeMap.set(t, {id:t, deg:0, row:r});
-    nodeMap.get(s).deg++; nodeMap.get(t).deg++;
-    links.push({source:s, target:t, row:r});
-  });
-  const nodes = [...nodeMap.values()];
-  document.getElementById('stat-nodes').textContent = nodes.length;
-  document.getElementById('stat-links').textContent = links.length;
-  setDot('nodes', nodes.length>0, `${nodes.length} NODES`);
-  setDot('edges', links.length>0, `${links.length} LINKS`);
-
-  d3.select(svgEl).selectAll('*').remove();
-  const W = svgEl.clientWidth || svgEl.parentElement.clientWidth;
-  const H = svgEl.clientHeight || svgEl.parentElement.clientHeight;
-  const svg = d3.select(svgEl).attr('viewBox',`0 0 ${W} ${H}`);
-  const g = svg.append('g');
-  const zoom = d3.zoom().scaleExtent([0.1,8]).on('zoom',e=>g.attr('transform',e.transform));
-  svg.call(zoom);
-  document.getElementById('btn-reset-zoom').onclick = () => {
-    const bb = g.node().getBBox();
-    if (!bb.width||!bb.height) { svg.transition().duration(500).call(zoom.transform,d3.zoomIdentity); return; }
-    const scale = 0.9 / Math.max(bb.width/W, bb.height/H);
-    const tx = W/2 - scale*(bb.x+bb.width/2), ty = H/2 - scale*(bb.y+bb.height/2);
-    svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity.translate(tx,ty).scale(scale));
-  };
-  const maxDeg = d3.max(nodes, d=>d.deg) || 1;
-  const color = d3.scaleLinear().domain([0,maxDeg]).range(['#2a6a3e','#86efac']);
-  const strength = +document.getElementById('range-strength').value;
-  const charge = +document.getElementById('range-charge').value;
-  if (simulation) simulation.stop();
-  simulation = d3.forceSimulation(nodes)
-    .force('link', d3.forceLink(links).id(d=>d.id).distance(strength*0.6))
-    .force('charge', d3.forceManyBody().strength(charge))
-    .force('center', d3.forceCenter(W/2,H/2))
-    .force('collide', d3.forceCollide(20));
-  const link = g.append('g').selectAll('line').data(links).join('line').attr('class','link').attr('stroke-width',1.2);
-  const node = g.append('g').selectAll('g').data(nodes).join('g').attr('class','node')
-    .call(d3.drag()
-      .on('start',(e,d)=>{ if(!e.active)simulation.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
-      .on('drag',(e,d)=>{ d.fx=e.x; d.fy=e.y; })
-      .on('end',(e,d)=>{ if(!e.active)simulation.alphaTarget(0); d.fx=null; d.fy=null; }));
-  const radius = d => Math.max(6, Math.min(18, 4+d.deg*2));
-  node.append('circle').attr('r', radius).attr('fill', d=>color(d.deg)).attr('stroke','rgba(134,239,172,0.35)');
-  node.append('text').attr('dy',d=>radius(d)+12).attr('text-anchor','middle')
-    .text(d=>d.id.length>16 ? d.id.slice(0,14)+'…' : d.id);
-  const tooltip = document.getElementById('tooltip');
-  node.on('mousemove',(e,d)=>{
-    const labelCol = document.getElementById('sel-label').value;
-    tooltip.style.display=''; tooltip.style.left=(e.clientX+14)+'px'; tooltip.style.top=(e.clientY-10)+'px';
-    document.getElementById('tt-title').textContent = d.id;
-    let html = `<div class="tt-row">Connections: <span>${d.deg}</span></div>`;
-    if (labelCol && d.row[labelCol]) html += `<div class="tt-row">${labelCol}: <span>${d.row[labelCol]}</span></div>`;
-    document.getElementById('tt-body').innerHTML = html;
-  }).on('mouseleave',()=>{ tooltip.style.display='none'; });
-  node.on('click',(e,d)=>highlightNode(d.id));
-  simulation.on('tick',()=>{
-    link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y).attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);
-    node.attr('transform',d=>`translate(${d.x},${d.y})`);
-  });
-  svgEl._link = link; svgEl._node = node;
-}
-
-function highlightNode(id) {
-  const svgEl = document.getElementById('graph-svg');
-  if (!svgEl._node) return;
-  svgEl._node.classed('highlighted', d=>d.id===id);
-  svgEl._link.classed('highlighted', d=>d.source.id===id||d.target.id===id);
-}
-
-document.getElementById('btn-render').addEventListener('click', renderGraph);
-['range-strength','range-charge'].forEach(id => {
-  document.getElementById(id).addEventListener('change', renderGraph);
-});
-
-function show(id) { document.getElementById(id).style.display = ''; }
 function setDot(key, on, text) {
   const dot = document.getElementById(`dot-${key}`);
   const txt = document.getElementById(`st-${key}`);
   if (dot) dot.className = 'dot' + (on?' on':'');
   if (txt) txt.textContent = text;
+}
+
+async function describeColumn(field) {
+  if (!currentTable) return;
+  const descCol = `${field} - Description`;
+  if (columns.includes(descCol)) { toast(`${descCol} already added`); return; }
+  toast(`looking up ${field} descriptions…`);
+  try {
+    const r = await fetch(`/api/data/${currentTable}/describe`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({field})
+    });
+    const d = await r.json();
+    if (!r.ok) { toast(d.hint || d.error, true); return; }
+    if (d.warning) toast(`The required table does not have the respective entries, please upload ${d.text_table}.`, true);
+    // Find source column (may be enriched: "FIELD - Label" or just "FIELD")
+    const srcIdx = columns.findIndex(c => c === field || c.startsWith(field + ' - '));
+    if (srcIdx < 0) { toast(`column ${field} not found`, true); return; }
+    const srcCol = columns[srcIdx];
+    // Insert description column immediately after source column
+    columns.splice(srcIdx + 1, 0, descCol);
+    const values = d.values || {};
+    for (const row of rows) {
+      const rawVal = String(row[srcCol] ?? '').trim();
+      row[descCol] = values[rawVal] || '';
+    }
+    renderTable();
+    const resolved = Object.keys(values).length;
+    toast(`${descCol} added · ${resolved} value${resolved !== 1 ? 's' : ''} resolved` +
+          (d.text_table ? ` from ${d.text_table}` : ''));
+  } catch(e) { toast('error: ' + e.message, true); }
 }
 
 (async () => { if (await checkAuth()) await refreshStatus(); })();
