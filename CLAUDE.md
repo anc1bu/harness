@@ -8,6 +8,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Running the App
 
+Before you do any work, mention how you could verify that work. 
+Please go back and verify all your work so far. 
+Make sure you used best practices, were efficient, and didn't introduce any issues.
+
 ```bash
 # Development (Flask dev server)
 python app.py
@@ -38,6 +42,7 @@ data/
   reference/
     dd03l.json                # SAP field definitions (merged on upload)
     dd04t.sqlite              # SAP field descriptions (SQLite for fast lookup)
+    dd08l.json                # SAP domain/check table→text table mappings
   transactional/
     TABLE_SYSTEM_CLIENT_DATE.json   # Per-table transactional data
 ```
@@ -48,7 +53,10 @@ data/
 - **DD04T upload streams NDJSON** progress to the client to bypass Cloudflare's 100s timeout
 - **SQLite IN-clause batching** at 500 items to stay under SQLite's 999-variable limit
 - **Column enrichment**: FIELDNAME → ROLLNAME → DD04T description lookup happens at `/api/data/<table>` time
-- **Transactional file naming** is strictly validated: `TABLE_SYSTEM_CLIENT_YYYYMMDD.xlsx`; backend rejects files where <50% of columns match known SAP field names
+- **Transactional file naming** is strictly validated: `TABLE_SYSTEM_CLIENT_YYYYMMDD.xlsx`; backend rejects files where <95% of columns match known SAP field names
+- **Re-enrichment on reference upload**: `_reenrich_all()` re-runs column enrichment across every stored transactional table whenever DD03L or DD04T is uploaded; merges new enrichments without discarding old ones
+- **Value description lookup** (`/api/data/<table>/describe`): 3-step chain — look up `CHECKTABLE` from DD03L for the field → find the text table via DD08L (where `FRKART='TEXT'`) → filter loaded transactional table rows by `SPRAS` to build a value→description map returned to the frontend
+- **`HARNESS_NO_AUTH=1` is set in `deploy/harness.service`** (production), not just local dev — the VPS has auth disabled by design
 
 ### API Endpoints
 
@@ -60,10 +68,20 @@ data/
 | GET | `/api/auth/me` | Auth status check |
 | POST | `/api/upload/dd03l` | Upload field definitions (merges) |
 | POST | `/api/upload/dd04t` | Upload descriptions (streams NDJSON progress) |
+| POST | `/api/upload/dd08l` | Upload domain/text table mappings |
 | POST | `/api/upload/trans` | Upload transactional data |
 | GET | `/api/status` | Dashboard status |
 | GET | `/api/data/<table>` | Fetch table rows with enriched headers |
+| POST | `/api/data/<table>/describe` | Resolve value descriptions for a field via check table chain |
 | DELETE | `/api/data/<table>` | Remove table |
+
+### Frontend Notes
+
+- **Layout**: 3-panel CSS grid — control panel (320px fixed) | D3 graph area | data table; topbar with status dots
+- **Render limit**: `renderTable()` shows only the first 200 rows; no pagination or server-side filtering
+- **`describeColumn()`**: patches a description column inline after the source column; result is merged client-side without re-fetching the table
+- **D3.js is imported but unused** — graph visualization code has not been implemented yet
+- **Global state**: `rows`, `columns`, `currentTable`, `serverStatus` are plain globals; updates flow as server fetch → global assignment → imperative DOM render
 
 ## Deployment
 
