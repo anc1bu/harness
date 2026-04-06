@@ -6,15 +6,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Harness** is a SAP data reference and transactional data management tool. It ingests SAP metadata (DD03L field definitions, DD04T field descriptions) and transactional table exports, then provides a web UI for browsing, searching, and visualizing relationships between them.
 
-## Running the App
+## Working Guidelines
 
-Before you do any work, mention how you could verify that work. 
-Please go back and verify all your work so far. 
-Make sure you used best practices, were efficient, and didn't introduce any issues.
+Before starting any task, state how you'll verify the work. After completing it, verify it — check best practices, efficiency, and absence of regressions.
+
+## Running the App
 
 ```bash
 # Development (Flask dev server)
-python app.py
+venv/bin/python app.py
 # or via Claude Code launch config: select "Flask Dev Server"
 
 # Production-like (Gunicorn)
@@ -24,7 +24,7 @@ venv/bin/gunicorn --workers 2 --bind 127.0.0.1:5000 --timeout 600 app:app
 Environment variables:
 - `HARNESS_SECRET` — session key (auto-generated if unset)
 - `HARNESS_DATA` — data directory (defaults to `./data`)
-- `HARNESS_NO_AUTH=1` — bypass authentication (dev mode)
+- `HARNESS_NO_AUTH=1` — bypass authentication; set in production (`deploy/harness.service`) by design
 
 No test suite exists. Testing is manual via the web UI.
 
@@ -55,8 +55,10 @@ data/
 - **Column enrichment**: FIELDNAME → ROLLNAME → DD04T description lookup happens at `/api/data/<table>` time
 - **Transactional file naming** is strictly validated: `TABLE_SYSTEM_CLIENT_YYYYMMDD.xlsx`; backend rejects files where <95% of columns match known SAP field names
 - **Re-enrichment on reference upload**: `_reenrich_all()` re-runs column enrichment across every stored transactional table whenever DD03L or DD04T is uploaded; merges new enrichments without discarding old ones
-- **Value description lookup** (`/api/data/<table>/describe`): 3-step chain — look up `CHECKTABLE` from DD03L for the field → find the text table via DD08L (where `FRKART='TEXT'`) → filter loaded transactional table rows by `SPRAS` to build a value→description map returned to the frontend
-- **`HARNESS_NO_AUTH=1` is set in `deploy/harness.service`** (production), not just local dev — the VPS has auth disabled by design
+- **Value description lookup** (`/api/data/<table>/describe`): 3-step chain — look up `CHECKTABLE` from DD03L for the field → find the text table via DD08L (where `FRKART='TEXT'`) → filter transactional table rows by `SPRAS` (EN/E) and return `{value: VTEXT}` map
+- **Transactional storage is keyed by TABLE name only**: `VBAK_SYS_100_20240101.xlsx` → `data/transactional/VBAK.json`; re-uploading any file for the same TABLE overwrites the previous data regardless of system/client/date
+- **95% column match threshold** applies to non-empty headers only (empty columns are excluded from both numerator and denominator)
+- **`VTEXT` is hardcoded** as the value-description column when resolving text table rows in `describe_column`
 
 ### API Endpoints
 

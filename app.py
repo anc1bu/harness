@@ -395,10 +395,18 @@ def up_trans():
             continue
         if all(v is None or v == '' for v in r): continue
         rows.append({h: ('' if v is None else v) for h, v in zip(headers, r)})
-    # Column validation: ≥50% of headers must match DD03L field names for this table
+    # Column validation: DD03L must be loaded and must contain this table
     dd03l = _read_ref('dd03l.json')
-    tbl_fields = {r['FIELDNAME'] for r in (dd03l or {}).get('rows', [])
+    if not dd03l:
+        return jsonify(error='dd03l_required',
+                       hint='DD03L is not loaded. Upload DD03L before uploading any table.'), 400
+    tbl_fields = {r['FIELDNAME'] for r in dd03l.get('rows', [])
                   if r.get('TABNAME') == table and r.get('FIELDNAME')}
+    if not tbl_fields:
+        return jsonify(error='table_not_in_dd03l',
+                       hint=f'No entries found in DD03L for table {table}. '
+                            f'Upload the DD03L extract containing {table} first.'), 400
+    # ≥95% of non-empty column headers must match known field names for this table
     non_empty_headers = [h for h in headers if h]
     matched_headers = [h for h in non_empty_headers if h in tbl_fields]
     unmatched_headers = [h for h in non_empty_headers if h not in tbl_fields]

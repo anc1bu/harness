@@ -232,7 +232,8 @@
       padding: 24px 28px; max-width: 480px; width: 90vw;
       box-shadow: var(--glow); color: var(--text); font-size: 12px; letter-spacing: .5px;
     }
-    #modal-box.err { border-color: var(--danger); box-shadow: 0 0 16px rgba(224,96,96,0.35); }
+    #modal-box.err  { border-color: var(--danger); box-shadow: 0 0 16px rgba(224,96,96,0.35); }
+    #modal-box.warn { border-color: var(--warn);   box-shadow: 0 0 16px rgba(224,176,80,0.35); }
     #modal-msg { margin-bottom: 18px; line-height: 1.6; white-space: pre-wrap; }
     #modal-ok {
       display: block; margin-left: auto; padding: 6px 22px;
@@ -318,12 +319,12 @@
 function tick() { document.getElementById('clock').textContent = new Date().toTimeString().slice(0,8); }
 tick(); setInterval(tick, 1000);
 
-function toast(msg, isErr=false) {
+// type: 'ok' | 'warn' | 'err'
+function toast(msg, type = 'ok') {
   const overlay = document.getElementById('modal-overlay');
   const box = document.getElementById('modal-box');
-  const msgEl = document.getElementById('modal-msg');
-  msgEl.textContent = msg;
-  box.className = isErr ? 'err' : '';
+  document.getElementById('modal-msg').textContent = msg;
+  box.className = type === 'err' ? 'err' : type === 'warn' ? 'warn' : '';
   overlay.classList.add('show');
   document.getElementById('modal-ok').onclick = () => overlay.classList.remove('show');
 }
@@ -397,7 +398,7 @@ fileTrans.addEventListener('change', e => {
 
 async function uploadTrans(file) {
   if (!FNAME_RE.test(file.name)) {
-    toast(`bad filename — expected TABLE_SYSTEM_CLIENT_YYYYMMDD.xlsx`, true); return;
+    toast(`bad filename — expected TABLE_SYSTEM_CLIENT_YYYYMMDD.xlsx`, 'err'); return;
   }
   toast(`uploading ${file.name}…`);
   const fd = new FormData(); fd.append('file', file);
@@ -407,24 +408,24 @@ async function uploadTrans(file) {
     if (!r.ok) {
       if (d.error === 'non_technical_columns') {
         toast(`rejected: only ${d.matched}/${d.total} columns are valid ${d.table} field names. ` +
-              `Unknown: ${(d.unmatched_sample||[]).join(', ')}. Re-export with technical names.`, true);
+              `Unknown: ${(d.unmatched_sample||[]).join(', ')}. Re-export with technical names.`, 'err');
       } else {
-        toast(`error: ${d.error}${d.hint?' — '+d.hint:''}`, true);
+        toast(d.hint || `error: ${d.error}`, 'err');
       }
       return;
     }
-    toast(`${d.table}: ${d.rows} rows · ${d.matched}/${d.matched+d.unmatched} cols matched`);
+    toast(`${d.table}: ${d.rows} rows uploaded`);
     await refreshStatus();
     document.getElementById('sel-table').value = d.table;
     loadAndRender();
-  } catch (e) { toast('upload error: '+e.message, true); }
+  } catch (e) { toast('upload error: ' + e.message, 'err'); }
 }
 
 async function loadAndRender() {
   const table = document.getElementById('sel-table').value;
   if (!table) return;
   const r = await fetch(`/api/data/${table}`);
-  if (!r.ok) { toast('load failed', true); return; }
+  if (!r.ok) { toast('load failed', 'err'); return; }
   const d = await r.json();
   rows = d.rows; columns = d.columns; currentTable = table;
   document.querySelectorAll('#trans-list tbody tr').forEach(row => {
@@ -473,11 +474,11 @@ async function describeColumn(field) {
       body: JSON.stringify({field})
     });
     const d = await r.json();
-    if (!r.ok) { toast(d.hint || d.error, true); return; }
-    if (d.warning) toast(`The required table does not have the respective entries, please upload ${d.text_table}.`, true);
+    if (!r.ok) { toast(d.hint || d.error, 'err'); return; }
+    if (d.warning) toast(`The required table does not have the respective entries, please upload ${d.text_table}.`, 'warn');
     // Find source column (may be enriched: "FIELD - Label" or just "FIELD")
     const srcIdx = columns.findIndex(c => c === field || c.startsWith(field + ' - '));
-    if (srcIdx < 0) { toast(`column ${field} not found`, true); return; }
+    if (srcIdx < 0) { toast(`column ${field} not found`, 'err'); return; }
     const srcCol = columns[srcIdx];
     // Insert description column immediately after source column
     columns.splice(srcIdx + 1, 0, descCol);
@@ -490,7 +491,7 @@ async function describeColumn(field) {
     const resolved = Object.keys(values).length;
     toast(`${descCol} added · ${resolved} value${resolved !== 1 ? 's' : ''} resolved` +
           (d.text_table ? ` from ${d.text_table}` : ''));
-  } catch(e) { toast('error: ' + e.message, true); }
+  } catch(e) { toast('error: ' + e.message, 'err'); }
 }
 
 (async () => { if (await checkAuth()) await refreshStatus(); })();
