@@ -54,6 +54,12 @@ def init_db():
         email TEXT UNIQUE NOT NULL,
         pwhash TEXT NOT NULL,
         created_at TEXT NOT NULL)''')
+    c.execute('''CREATE TABLE IF NOT EXISTS projects (
+        id         INTEGER PRIMARY KEY,
+        name       TEXT UNIQUE NOT NULL COLLATE NOCASE,
+        created_at TEXT NOT NULL)''')
+    c.execute('INSERT OR IGNORE INTO projects (name, created_at) VALUES (?,?)',
+              ('Dev', datetime.utcnow().isoformat() + 'Z'))
     c.commit(); c.close()
 init_db()
 
@@ -61,6 +67,7 @@ def login_required(f):
     @wraps(f)
     def w(*a, **kw):
         if NO_AUTH:
+            session['project'] = 'Dev'
             return f(*a, **kw)
         if 'uid' not in session:
             return jsonify(error='auth_required'), 401
@@ -109,13 +116,45 @@ def logout():
     session.clear()
     return jsonify(ok=True)
 
+@app.get('/api/projects')
+def list_projects():
+    if not NO_AUTH and 'uid' not in session:
+        return jsonify(error='auth_required'), 401
+    c = db()
+    rows = c.execute('SELECT name FROM projects ORDER BY name COLLATE NOCASE').fetchall()
+    c.close()
+    return jsonify(projects=[r['name'] for r in rows], current=session.get('project'))
+
+@app.post('/api/auth/set-project')
+@login_required
+def set_project():
+    d = request.get_json(silent=True) or {}
+    name = (d.get('project') or '').strip()[:64]
+    if not name:
+        return jsonify(error='missing_project', hint='Project name is required'), 400
+    create = bool(d.get('create', False))
+    c = db()
+    if create:
+        c.execute('INSERT OR IGNORE INTO projects (name, created_at) VALUES (?,?)',
+                  (name, datetime.utcnow().isoformat() + 'Z'))
+        c.commit()
+    else:
+        row = c.execute('SELECT name FROM projects WHERE name=? COLLATE NOCASE', (name,)).fetchone()
+        if not row:
+            c.close()
+            return jsonify(error='project_not_found', hint=f'Project "{name}" does not exist'), 404
+        name = row['name']  # use canonical casing from DB
+    c.close()
+    session['project'] = name
+    return jsonify(ok=True, project=name)
+
 @app.get('/api/auth/me')
 def me():
     if NO_AUTH:
-        return jsonify(authed=True, email=DEV_EMAIL, dev=True)
+        return jsonify(authed=True, email=DEV_EMAIL, dev=True, project='Dev')
     if 'uid' not in session:
         return jsonify(authed=False)
-    return jsonify(authed=True, email=session.get('email'))
+    return jsonify(authed=True, email=session.get('email'), project=session.get('project'))
 
 # ───────────── STATUS ─────────────
 def _read_ref(name):
@@ -134,16 +173,22 @@ def status():
                       'tabnames': dd03l.get('tabnames', [])}
     dd04t_info = _dd04t_info()
     dd08l_info = _dd08l_info()
+    current_project = 'Dev' if NO_AUTH else session.get('project')
     tables = []
     tdir = os.path.join(DATA, 'transactional')
     for fn in sorted(os.listdir(tdir)):
         if fn.endswith('.json'):
             with open(os.path.join(tdir, fn)) as f:
                 d = json.load(f)
+            if d.get('project') != current_project:
+                continue
             tables.append({'name': fn[:-5], 'rows': len(d.get('rows', [])),
                            'columns': len(d.get('columns', [])),
                            'filename': d.get('filename'),
-                           'uploadedAt': d.get('uploadedAt')})
+                           'uploadedAt': d.get('uploadedAt'),
+                           'system': d.get('system'),
+                           'client': d.get('client'),
+                           'date': d.get('date')})
     return jsonify(dd03l=dd03l_info, dd04t=dd04t_info, dd08l=dd08l_info, tables=tables)
 
 # ───────────── UPLOADS ─────────────
@@ -376,6 +421,10 @@ FNAME_RE = re.compile(r'^([A-Z0-9]+)_([A-Z0-9]+)_(\d+)_(\d{8})\.xlsx?$', re.I)
 @app.post('/api/upload/trans')
 @login_required
 def up_trans():
+    current_project = 'Dev' if NO_AUTH else session.get('project')
+    if not current_project:
+        return jsonify(error='no_project',
+                       hint='Select or create a project before uploading tables.'), 400
     f = request.files.get('file')
     if not f: return jsonify(error='no_file'), 400
     m = FNAME_RE.match(f.filename)
@@ -418,6 +467,7 @@ def up_trans():
                             f'Re-export from SE16N using technical column names.'), 400
     enriched_columns = _enrich_columns(table, headers)
     out = {'table': table, 'system': system, 'client': client, 'date': date,
+           'project': current_project,
            'filename': f.filename,
            'uploadedAt': datetime.utcnow().isoformat() + 'Z',
            'columns': headers, 'rows': rows,
@@ -521,10 +571,34 @@ def del_data(table):
     return jsonify(ok=True)
 
 # ───────────── STATIC ─────────────
+@app.post('/api/admin/migrate-legacy')
+@login_required
+def migrate_legacy():
+    d = request.get_json(silent=True) or {}
+    project = (d.get('project') or '').strip()
+    if not project:
+        return jsonify(error='missing_project'), 400
+    tdir = os.path.join(DATA, 'transactional')
+    updated = 0
+    for fn in os.listdir(tdir):
+        if not fn.endswith('.json'): continue
+        p = os.path.join(tdir, fn)
+        try:
+            with open(p) as f: data = json.load(f)
+            if 'project' not in data:
+                data['project'] = project
+                with open(p, 'w') as f: json.dump(data, f)
+                updated += 1
+        except Exception:
+            pass
+    return jsonify(ok=True, updated=updated)
+
 @app.get('/')
 def root():
     if not NO_AUTH and 'uid' not in session:
         return redirect('/login')
+    if not NO_AUTH and 'project' not in session:
+        return redirect('/login?step=project')
     return send_from_directory(HERE, 'index.html')
 
 @app.get('/login')

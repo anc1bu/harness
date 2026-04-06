@@ -256,6 +256,7 @@
     <div><span class="dot" id="dot-edges"></span><span id="st-edges">0 LINKS</span></div>
   </div>
   <div class="right">
+    <div class="user">project: <span id="proj-name">—</span></div>
     <div class="user">user: <span id="user-email">—</span></div>
     <div class="logout" id="btn-logout">Logout</div>
     <div class="clock" id="clock">--:--:--</div>
@@ -268,6 +269,15 @@
     <div class="panel-body">
 
       <div class="ctrl-label" style="margin-bottom:8px">Configuration Tables</div>
+      <div class="upload-zone" id="zone-config">
+        <div class="uz-icon">⬆</div>
+        <div>Drop .xlsx here or click to upload</div>
+        <div class="uz-hint">TABLE_SYSTEM_CLIENT_YYYYMMDD.xlsx</div>
+        <input type="file" id="file-config" accept=".xlsx,.xls" hidden>
+      </div>
+      <div id="config-list"></div>
+
+      <div class="ctrl-label" style="margin-bottom:8px;margin-top:14px">Transactional Tables</div>
       <div class="upload-zone" id="zone-trans">
         <div class="uz-icon">⬆</div>
         <div>Drop .xlsx here or click to upload</div>
@@ -337,7 +347,9 @@ async function checkAuth() {
   const r = await fetch('/api/auth/me');
   const d = await r.json();
   if (!d.authed) { window.location.href = '/login'; return false; }
+  if (!d.project) { window.location.href = '/login?step=project'; return false; }
   document.getElementById('user-email').textContent = d.email;
+  document.getElementById('proj-name').textContent = d.project;
   return true;
 }
 document.getElementById('btn-logout').addEventListener('click', async () => {
@@ -355,46 +367,60 @@ async function refreshStatus() {
   setDot('dd08l', !!s.dd08l, s.dd08l ? `DD08L: ${s.dd08l.rows}r` : 'DD08L: —');
   const prevTable = document.getElementById('sel-table').value;
   const sel = document.getElementById('sel-table');
-  const list = document.getElementById('trans-list');
-  if (s.tables && s.tables.length) {
-    sel.innerHTML = s.tables.map(t => `<option value="${t.name}">${t.name}</option>`).join('');
-    if (prevTable && [...sel.options].some(o => o.value === prevTable)) sel.value = prevTable;
-    list.innerHTML = `<table>
-      <thead><tr><th>Table</th><th>System</th><th>Client</th><th>Date</th><th>Entries</th></tr></thead>
-      <tbody>${s.tables.map(t => `
-        <tr data-table="${t.name}" class="${currentTable === t.name ? 'active' : ''}">
-          <td>${t.name}</td><td>${t.system||'—'}</td><td>${t.client||'—'}</td>
-          <td>${t.date||'—'}</td><td>${t.rows}</td>
-        </tr>`).join('')}
-      </tbody></table>`;
-    list.querySelectorAll('tbody tr').forEach(row => {
-      row.addEventListener('click', () => {
-        sel.value = row.dataset.table;
-        loadAndRender();
-      });
+
+  const allTables = s.tables || [];
+  const configTables = allTables.filter(t => t.name.startsWith('DD'));
+  const transTables  = allTables.filter(t => !t.name.startsWith('DD'));
+
+  sel.innerHTML = allTables.map(t => `<option value="${t.name}">${t.name}</option>`).join('');
+  if (prevTable && [...sel.options].some(o => o.value === prevTable)) sel.value = prevTable;
+
+  renderTableList('config-list', configTables, sel);
+  renderTableList('trans-list',  transTables,  sel);
+}
+
+function renderTableList(listId, tables, sel) {
+  const list = document.getElementById(listId);
+  if (!tables.length) { list.innerHTML = ''; return; }
+  list.innerHTML = `<table>
+    <thead><tr><th>Table</th><th>System</th><th>Client</th><th>Date</th><th>Entries</th></tr></thead>
+    <tbody>${tables.map(t => `
+      <tr data-table="${t.name}" class="${currentTable === t.name ? 'active' : ''}">
+        <td>${t.name}</td><td>${t.system||'—'}</td><td>${t.client||'—'}</td>
+        <td>${t.date ? t.date.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3') : '—'}</td>
+        <td>${t.rows}</td>
+      </tr>`).join('')}
+    </tbody></table>`;
+  list.querySelectorAll('tbody tr').forEach(row => {
+    row.addEventListener('click', () => {
+      sel.value = row.dataset.table;
+      loadAndRender();
     });
-  } else {
-    sel.innerHTML = '';
-    list.innerHTML = '';
-  }
+  });
 }
 
 
-const fileTrans = document.getElementById('file-trans');
+const fileTrans  = document.getElementById('file-trans');
+const fileConfig = document.getElementById('file-config');
 const FNAME_RE = /^([A-Z0-9]+)_([A-Z0-9]+)_(\d+)_(\d{8})\.xlsx?$/i;
 
-const zone = document.getElementById('zone-trans');
-zone.addEventListener('click', () => fileTrans.click());
-zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
-zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
-zone.addEventListener('drop', e => {
-  e.preventDefault(); zone.classList.remove('drag-over');
-  if (e.dataTransfer.files[0]) uploadTrans(e.dataTransfer.files[0]);
-});
-fileTrans.addEventListener('change', e => {
-  if (e.target.files[0]) uploadTrans(e.target.files[0]);
-  e.target.value = '';
-});
+function wireUploadZone(zoneId, fileInput) {
+  const zone = document.getElementById(zoneId);
+  zone.addEventListener('click', () => fileInput.click());
+  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+  zone.addEventListener('drop', e => {
+    e.preventDefault(); zone.classList.remove('drag-over');
+    if (e.dataTransfer.files[0]) uploadTrans(e.dataTransfer.files[0]);
+  });
+  fileInput.addEventListener('change', e => {
+    if (e.target.files[0]) uploadTrans(e.target.files[0]);
+    e.target.value = '';
+  });
+}
+
+wireUploadZone('zone-trans',  fileTrans);
+wireUploadZone('zone-config', fileConfig);
 
 async function uploadTrans(file) {
   if (!FNAME_RE.test(file.name)) {
@@ -428,7 +454,7 @@ async function loadAndRender() {
   if (!r.ok) { toast('load failed', 'err'); return; }
   const d = await r.json();
   rows = d.rows; columns = d.columns; currentTable = table;
-  document.querySelectorAll('#trans-list tbody tr').forEach(row => {
+  document.querySelectorAll('#trans-list tbody tr, #config-list tbody tr').forEach(row => {
     row.classList.toggle('active', row.dataset.table === table);
   });
   setDot('table', true, `TABLE: ${table}`);

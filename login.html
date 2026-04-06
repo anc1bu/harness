@@ -81,28 +81,62 @@
     }
     .msg.err { color: var(--danger); }
     .msg.ok { color: var(--accent2); }
+    .ctrl-label {
+      font-size: 9px; letter-spacing: 2px; color: var(--text-dim);
+      text-transform: uppercase; margin-bottom: 8px; margin-top: 16px;
+    }
+    .ctrl-label:first-child { margin-top: 0; }
+    .proj-item {
+      padding: 9px 12px; border: 1px solid var(--border); border-radius: 4px;
+      margin-bottom: 6px; cursor: pointer; font-size: 12px; transition: all .2s;
+    }
+    .proj-item:hover { border-color: var(--accent); color: var(--accent); background: rgba(74,222,128,0.06); }
+    .divider {
+      border: none; border-top: 1px solid var(--border); margin: 18px 0;
+    }
   </style>
 </head>
 <body>
   <div class="auth-box">
     <div class="logo">HARNESS <span>//</span> SAPCONS</div>
-    <div class="sub">Access Terminal</div>
-    <div class="tabs">
-      <div class="tab active" data-mode="login">Sign In</div>
-      <div class="tab" data-mode="signup">Sign Up</div>
+
+    <!-- Step 1: Credentials -->
+    <div id="creds-panel">
+      <div class="sub">Access Terminal</div>
+      <div class="tabs">
+        <div class="tab active" data-mode="login">Sign In</div>
+        <div class="tab" data-mode="signup">Sign Up</div>
+      </div>
+      <form id="form" autocomplete="off">
+        <div class="field">
+          <label for="email">Email</label>
+          <input type="email" id="email" required autocomplete="email" />
+        </div>
+        <div class="field">
+          <label for="password">Password</label>
+          <input type="password" id="password" required minlength="6" autocomplete="current-password" />
+        </div>
+        <button type="submit" class="btn" id="btn">▶ Sign In</button>
+        <div class="msg" id="msg"></div>
+      </form>
     </div>
-    <form id="form" autocomplete="off">
-      <div class="field">
-        <label for="email">Email</label>
-        <input type="email" id="email" required autocomplete="email" />
+
+    <!-- Step 2: Project selection (hidden until credentials pass) -->
+    <div id="proj-panel" style="display:none">
+      <div class="sub">Select Project</div>
+      <div id="select-section">
+        <div class="ctrl-label">Existing Projects</div>
+        <div id="proj-list"></div>
+        <hr class="divider">
       </div>
+      <div class="ctrl-label">New Project</div>
       <div class="field">
-        <label for="password">Password</label>
-        <input type="password" id="password" required minlength="6" autocomplete="current-password" />
+        <label for="new-proj-input">Project Name</label>
+        <input type="text" id="new-proj-input" maxlength="64" placeholder="e.g. Client Alpha" />
       </div>
-      <button type="submit" class="btn" id="btn">▶ Sign In</button>
-      <div class="msg" id="msg"></div>
-    </form>
+      <button type="button" class="btn" id="btn-create-proj">▶ Create &amp; Enter</button>
+      <div class="msg" id="proj-msg"></div>
+    </div>
   </div>
 
 <script>
@@ -146,7 +180,9 @@ document.getElementById('form').addEventListener('submit', async e => {
     } else {
       msg.textContent = mode === 'login' ? 'welcome back' : 'account created';
       msg.className = 'msg ok';
-      setTimeout(() => { window.location.href = '/'; }, 400);
+      const pr = await fetch('/api/projects');
+      const pd = await pr.json();
+      setTimeout(() => showProjectStep(pd.projects), 400);
     }
   } catch (err) {
     msg.textContent = 'Network error';
@@ -155,6 +191,80 @@ document.getElementById('form').addEventListener('submit', async e => {
     btn.disabled = false;
   }
 });
+
+function showProjectStep(projects) {
+  document.getElementById('creds-panel').style.display = 'none';
+  const panel = document.getElementById('proj-panel');
+  panel.style.display = '';
+  const selectSection = document.getElementById('select-section');
+  const projList = document.getElementById('proj-list');
+  if (!projects || !projects.length) {
+    selectSection.style.display = 'none';
+  } else {
+    selectSection.style.display = '';
+    projList.innerHTML = projects.map(p =>
+      `<div class="proj-item" data-p="${p.replace(/"/g, '&quot;')}">${p}</div>`
+    ).join('');
+    projList.querySelectorAll('.proj-item').forEach(el =>
+      el.addEventListener('click', () => selectProject(el.dataset.p))
+    );
+  }
+  document.getElementById('new-proj-input').focus();
+}
+
+async function selectProject(name) {
+  const projMsg = document.getElementById('proj-msg');
+  projMsg.textContent = ''; projMsg.className = 'msg';
+  try {
+    const r = await fetch('/api/auth/set-project', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project: name })
+    });
+    const d = await r.json();
+    if (r.ok) {
+      window.location.href = '/';
+    } else {
+      projMsg.textContent = d.hint || d.error || 'Error';
+      projMsg.className = 'msg err';
+    }
+  } catch (err) {
+    projMsg.textContent = 'Network error';
+    projMsg.className = 'msg err';
+  }
+}
+
+document.getElementById('btn-create-proj').addEventListener('click', async () => {
+  const name = document.getElementById('new-proj-input').value.trim();
+  const projMsg = document.getElementById('proj-msg');
+  projMsg.textContent = ''; projMsg.className = 'msg';
+  if (!name) { projMsg.textContent = 'Enter a project name'; projMsg.className = 'msg err'; return; }
+  try {
+    const r = await fetch('/api/auth/set-project', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ project: name, create: true })
+    });
+    const d = await r.json();
+    if (r.ok) {
+      window.location.href = '/';
+    } else {
+      projMsg.textContent = d.hint || d.error || 'Error';
+      projMsg.className = 'msg err';
+    }
+  } catch (err) {
+    projMsg.textContent = 'Network error';
+    projMsg.className = 'msg err';
+  }
+});
+
+// If redirected back here with ?step=project (session has auth but no project)
+if (new URLSearchParams(location.search).get('step') === 'project') {
+  fetch('/api/projects')
+    .then(r => r.json())
+    .then(d => showProjectStep(d.projects))
+    .catch(() => {});
+}
 </script>
 </body>
 </html>
