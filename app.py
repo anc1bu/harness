@@ -444,7 +444,9 @@ def up_trans():
             continue
         if all(v is None or v == '' for v in r): continue
         rows.append({h: ('' if v is None else v) for h, v in zip(headers, r)})
-    # Column validation: DD03L must be loaded and must contain this table
+    # Column validation: DD03L must be loaded and must contain this table.
+    # Exception: if table == DD03L and every row has TABNAME=DD03L, skip the error
+    # and instead process the file as a DD03L reference update (same as /api/upload/dd03l).
     dd03l = _read_ref('dd03l.json')
     if not dd03l:
         return jsonify(error='dd03l_required',
@@ -452,19 +454,26 @@ def up_trans():
     tbl_fields = {r['FIELDNAME'] for r in dd03l.get('rows', [])
                   if r.get('TABNAME') == table and r.get('FIELDNAME')}
     if not tbl_fields:
-        return jsonify(error='table_not_in_dd03l',
-                       hint=f'No entries found in DD03L for table {table}. '
-                            f'Upload the DD03L extract containing {table} first.'), 400
-    # ≥95% of non-empty column headers must match known field names for this table
-    non_empty_headers = [h for h in headers if h]
-    matched_headers = [h for h in non_empty_headers if h in tbl_fields]
-    unmatched_headers = [h for h in non_empty_headers if h not in tbl_fields]
-    if not non_empty_headers or len(matched_headers) / len(non_empty_headers) < 0.95:
-        return jsonify(error='non_technical_columns', table=table,
-                       matched=len(matched_headers), total=len(non_empty_headers),
-                       unmatched_sample=unmatched_headers[:10],
-                       hint=f'Column headers must be SAP technical field names. '
-                            f'Re-export from SE16N using technical column names.'), 400
+        is_dd03l_self = (
+            table == 'DD03L' and
+            bool(rows) and
+            all(str(r.get('TABNAME', '')).strip().upper() == 'DD03L' for r in rows)
+        )
+        if not is_dd03l_self:
+            return jsonify(error='table_not_in_dd03l',
+                           hint=f'No entries found in DD03L for table {table}. '
+                                f'Upload the DD03L extract containing {table} first.'), 400
+    else:
+        # ≥95% of non-empty column headers must match known field names for this table
+        non_empty_headers = [h for h in headers if h]
+        matched_headers = [h for h in non_empty_headers if h in tbl_fields]
+        unmatched_headers = [h for h in non_empty_headers if h not in tbl_fields]
+        if not non_empty_headers or len(matched_headers) / len(non_empty_headers) < 0.95:
+            return jsonify(error='non_technical_columns', table=table,
+                           matched=len(matched_headers), total=len(non_empty_headers),
+                           unmatched_sample=unmatched_headers[:10],
+                           hint=f'Column headers must be SAP technical field names. '
+                                f'Re-export from SE16N using technical column names.'), 400
     enriched_columns = _enrich_columns(table, headers)
     out = {'table': table, 'system': system, 'client': client, 'date': date,
            'project': current_project,
@@ -474,6 +483,27 @@ def up_trans():
            'enriched_columns': enriched_columns}
     with open(os.path.join(DATA, 'transactional', f'{table}.json'), 'w') as o:
         json.dump(out, o)
+    # If this was a self-describing DD03L file, also update the DD03L reference
+    if table == 'DD03L' and not tbl_fields:
+        norm = [{_DD03L_HEADER_MAP.get(k, k): v for k, v in r.items()} for r in rows]
+        slim = []
+        for r in norm:
+            tn = str(r.get('TABNAME', '')).strip()
+            fn = str(r.get('FIELDNAME', '')).strip()
+            if not tn or not fn: continue
+            slim.append({k: (str(v).strip() if v is not None else '') for k, v in r.items()})
+        uploaded_tabnames = {r['TABNAME'] for r in slim}
+        existing = _read_ref('dd03l.json')
+        if existing:
+            kept = [r for r in existing.get('rows', []) if r.get('TABNAME') not in uploaded_tabnames]
+            slim = kept + slim
+        tabnames = sorted({r['TABNAME'] for r in slim})
+        ref_out = {'rows': slim, 'tabnames': tabnames,
+                   'uploadedAt': datetime.utcnow().isoformat() + 'Z',
+                   'filename': f.filename}
+        with open(os.path.join(DATA, 'reference', 'dd03l.json'), 'w') as o:
+            json.dump(ref_out, o)
+        _reenrich_all()
     return jsonify(ok=True, table=table, rows=len(rows), columns=len(headers),
                    system=system, client=client, date=date)
 
