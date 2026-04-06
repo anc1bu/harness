@@ -92,18 +92,24 @@
     }
     .ref-slot:hover .rs-replace { color: var(--accent); border-color: var(--accent); }
 
-    #trans-list { margin-bottom: 6px; }
-    #trans-list table { width: 100%; border-collapse: collapse; font-size: 10px; }
-    #trans-list thead th {
+    #trans-list, #config-list { margin-bottom: 6px; }
+    #trans-list table, #config-list table { width: 100%; border-collapse: collapse; font-size: 10px; }
+    #trans-list thead th, #config-list thead th {
       text-align: left; padding: 4px 6px; letter-spacing: 1px; color: var(--text-dim);
       border-bottom: 1px solid var(--border); font-weight: normal; text-transform: uppercase;
     }
-    #trans-list tbody tr { cursor: pointer; transition: background .12s; }
-    #trans-list tbody tr:hover { background: rgba(74,222,128,0.06); }
-    #trans-list tbody tr.active { background: rgba(74,222,128,0.1); }
-    #trans-list tbody tr.active td { color: var(--accent2); }
-    #trans-list td { padding: 5px 6px; border-bottom: 1px solid rgba(255,255,255,0.04); }
-    #trans-list td:last-child { color: var(--accent); text-align: right; }
+    #trans-list tbody tr, #config-list tbody tr { cursor: pointer; transition: background .12s; }
+    #trans-list tbody tr:hover, #config-list tbody tr:hover { background: rgba(74,222,128,0.06); }
+    #trans-list tbody tr.active, #config-list tbody tr.active { background: rgba(74,222,128,0.1); }
+    #trans-list tbody tr.active td, #config-list tbody tr.active td { color: var(--accent2); }
+    #trans-list td, #config-list td { padding: 5px 6px; border-bottom: 1px solid rgba(255,255,255,0.04); }
+    #trans-list td:nth-last-child(2), #config-list td:nth-last-child(2) { color: var(--accent); text-align: right; }
+    .del-btn, .del-ref-btn {
+      background: none; border: 1px solid transparent; color: var(--text-dim); cursor: pointer;
+      font-size: 9px; padding: 2px 6px; border-radius: 3px; letter-spacing: 1px;
+      font-family: inherit; transition: color .15s, background .15s, border-color .15s;
+    }
+    .del-btn:hover, .del-ref-btn:hover { color: var(--danger); border-color: var(--danger); background: rgba(224,96,96,0.10); }
 
     .upload-zone {
       border: 2px dashed var(--border); border-radius: 6px;
@@ -268,22 +274,17 @@
     <div class="panel-header"><div class="ph-dot"></div>CONTROL PANEL</div>
     <div class="panel-body">
 
-      <div class="ctrl-label" style="margin-bottom:8px">Configuration Tables</div>
-      <div class="upload-zone" id="zone-config">
-        <div class="uz-icon">⬆</div>
-        <div>Drop .xlsx here or click to upload</div>
-        <div class="uz-hint">TABLE_SYSTEM_CLIENT_YYYYMMDD.xlsx</div>
-        <input type="file" id="file-config" accept=".xlsx,.xls" hidden>
-      </div>
-      <div id="config-list"></div>
-
-      <div class="ctrl-label" style="margin-bottom:8px;margin-top:14px">Transactional Tables</div>
       <div class="upload-zone" id="zone-trans">
         <div class="uz-icon">⬆</div>
         <div>Drop .xlsx here or click to upload</div>
         <div class="uz-hint">TABLE_SYSTEM_CLIENT_YYYYMMDD.xlsx</div>
         <input type="file" id="file-trans" accept=".xlsx,.xls" hidden>
       </div>
+
+      <div class="ctrl-label" style="margin-bottom:8px;margin-top:14px">Configuration Tables</div>
+      <div id="config-list"></div>
+
+      <div class="ctrl-label" style="margin-bottom:8px;margin-top:14px">Transactional Tables</div>
       <div id="trans-list"></div>
       <select id="sel-table" style="display:none"></select>
 
@@ -369,26 +370,54 @@ async function refreshStatus() {
   const sel = document.getElementById('sel-table');
 
   const allTables = s.tables || [];
-  const configTables = allTables.filter(t => t.name.startsWith('DD'));
-  const transTables  = allTables.filter(t => !t.name.startsWith('DD'));
-
   sel.innerHTML = allTables.map(t => `<option value="${t.name}">${t.name}</option>`).join('');
   if (prevTable && [...sel.options].some(o => o.value === prevTable)) sel.value = prevTable;
 
-  renderTableList('config-list', configTables, sel);
-  renderTableList('trans-list',  transTables,  sel);
+  renderRefList(s);
+  renderTableList('trans-list', allTables, sel);  // all transactional tables (no DD* filter)
+}
+
+function renderRefList(s) {
+  const list = document.getElementById('config-list');
+  const refs = [
+    { key: 'dd03l', label: 'DD03L', info: s.dd03l },
+    { key: 'dd04t', label: 'DD04T', info: s.dd04t },
+    { key: 'dd08l', label: 'DD08L', info: s.dd08l },
+  ];
+  const loaded = refs.filter(r => r.info);
+  if (!loaded.length) { list.innerHTML = ''; return; }
+  list.innerHTML = `<table>
+    <thead><tr><th>Table</th><th>System</th><th>Client</th><th>Date</th><th>Entries</th><th></th></tr></thead>
+    <tbody>${loaded.map(r => `
+      <tr>
+        <td>${r.label}</td>
+        <td>${r.info.system||'—'}</td>
+        <td>${r.info.client||'—'}</td>
+        <td>${r.info.date ? r.info.date.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3') : '—'}</td>
+        <td>${r.info.rows}</td>
+        <td><button class="del-ref-btn" data-key="${r.key}" data-label="${r.label}">DELETE</button></td>
+      </tr>`).join('')}
+    </tbody></table>`;
+  list.querySelectorAll('.del-ref-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const r = await fetch(`/api/reference/${btn.dataset.key}`, { method: 'DELETE' });
+      if (r.ok) { await refreshStatus(); toast(`${btn.dataset.label} cleared`); }
+      else { toast('Delete failed', 'err'); }
+    });
+  });
 }
 
 function renderTableList(listId, tables, sel) {
   const list = document.getElementById(listId);
   if (!tables.length) { list.innerHTML = ''; return; }
   list.innerHTML = `<table>
-    <thead><tr><th>Table</th><th>System</th><th>Client</th><th>Date</th><th>Entries</th></tr></thead>
+    <thead><tr><th>Table</th><th>System</th><th>Client</th><th>Date</th><th>Entries</th><th></th></tr></thead>
     <tbody>${tables.map(t => `
       <tr data-table="${t.name}" class="${currentTable === t.name ? 'active' : ''}">
         <td>${t.name}</td><td>${t.system||'—'}</td><td>${t.client||'—'}</td>
         <td>${t.date ? t.date.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3') : '—'}</td>
         <td>${t.rows}</td>
+        <td><button class="del-btn" data-table="${t.name}">DELETE</button></td>
       </tr>`).join('')}
     </tbody></table>`;
   list.querySelectorAll('tbody tr').forEach(row => {
@@ -397,35 +426,88 @@ function renderTableList(listId, tables, sel) {
       loadAndRender();
     });
   });
+  list.querySelectorAll('.del-btn').forEach(btn => {
+    btn.addEventListener('click', async e => {
+      e.stopPropagation();
+      const table = btn.dataset.table;
+      const r = await fetch(`/api/data/${table}`, { method: 'DELETE' });
+      if (r.ok) {
+        if (currentTable === table) { currentTable = null; rows = []; columns = []; renderTable(); }
+        await refreshStatus();
+        toast(`${table} deleted`);
+      } else {
+        toast('Delete failed', 'err');
+      }
+    });
+  });
 }
 
 
-const fileTrans  = document.getElementById('file-trans');
-const fileConfig = document.getElementById('file-config');
+const fileTrans = document.getElementById('file-trans');
 const FNAME_RE = /^([A-Z0-9]+)_([A-Z0-9]+)_(\d+)_(\d{8})\.xlsx?$/i;
 
-function wireUploadZone(zoneId, fileInput) {
-  const zone = document.getElementById(zoneId);
-  zone.addEventListener('click', () => fileInput.click());
-  zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
-  zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
-  zone.addEventListener('drop', e => {
-    e.preventDefault(); zone.classList.remove('drag-over');
-    if (e.dataTransfer.files[0]) uploadTrans(e.dataTransfer.files[0]);
-  });
-  fileInput.addEventListener('change', e => {
-    if (e.target.files[0]) uploadTrans(e.target.files[0]);
-    e.target.value = '';
-  });
-}
+const zone = document.getElementById('zone-trans');
+zone.addEventListener('click', () => fileTrans.click());
+zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
+zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
+zone.addEventListener('drop', e => {
+  e.preventDefault(); zone.classList.remove('drag-over');
+  if (e.dataTransfer.files[0]) uploadFile(e.dataTransfer.files[0]);
+});
+fileTrans.addEventListener('change', e => {
+  if (e.target.files[0]) uploadFile(e.target.files[0]);
+  e.target.value = '';
+});
 
-wireUploadZone('zone-trans',  fileTrans);
-wireUploadZone('zone-config', fileConfig);
-
-async function uploadTrans(file) {
+async function uploadFile(file) {
   if (!FNAME_RE.test(file.name)) {
     toast(`bad filename — expected TABLE_SYSTEM_CLIENT_YYYYMMDD.xlsx`, 'err'); return;
   }
+  const prefix = file.name.split('_')[0].toUpperCase();
+  if (prefix === 'DD04T') { await uploadDD04T(file); return; }
+  if (prefix === 'DD08L') { await uploadRef(file, '/api/upload/dd08l', 'DD08L'); return; }
+  if (prefix === 'DD03L') { await uploadRef(file, '/api/upload/dd03l', 'DD03L'); return; }
+  await uploadTrans(file);
+}
+
+async function uploadRef(file, endpoint, label) {
+  toast(`uploading ${label}…`);
+  const fd = new FormData(); fd.append('file', file);
+  try {
+    const r = await fetch(endpoint, { method: 'POST', body: fd });
+    const d = await r.json();
+    if (!r.ok) { toast(d.hint || `error: ${d.error}`, 'err'); return; }
+    toast(`${label}: ${d.rows} rows loaded`);
+    await refreshStatus();
+  } catch (e) { toast('upload error: ' + e.message, 'err'); }
+}
+
+async function uploadDD04T(file) {
+  toast('uploading DD04T… (large file, please wait)');
+  const fd = new FormData(); fd.append('file', file);
+  try {
+    const r = await fetch('/api/upload/dd04t', { method: 'POST', body: fd });
+    if (!r.body) { toast('Streaming not supported by browser', 'err'); return; }
+    const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n'); buf = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        try {
+          const d = JSON.parse(line);
+          if (d.event === 'progress') toast(`DD04T: ${d.rows} rows…`);
+          if (d.event === 'done') { await refreshStatus(); toast(`DD04T: ${d.rows} rows loaded`); }
+          if (d.event === 'error') toast(`DD04T error: ${d.error}`, 'err');
+        } catch {}
+      }
+    }
+  } catch (e) { toast('upload error: ' + e.message, 'err'); }
+}
+
+async function uploadTrans(file) {
   toast(`uploading ${file.name}…`);
   const fd = new FormData(); fd.append('file', file);
   try {
