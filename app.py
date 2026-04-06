@@ -215,6 +215,20 @@ def me():
     return jsonify(authed=True, email=session.get('email'), project=session.get('project'))
 
 # ───────────── DD03L HELPERS ─────────────
+def _dd03l_initialized():
+    """Return True if _dd03l has entries for TABNAME='DD03L' (self-describing rows)."""
+    c = harness_db()
+    row = c.execute("SELECT 1 FROM _dd03l WHERE \"TABNAME\"='DD03L' LIMIT 1").fetchone()
+    c.close()
+    return row is not None
+
+def _dd03l_fields(tabname):
+    """Return set of FIELDNAME values for a given TABNAME in _dd03l."""
+    c = harness_db()
+    rows = c.execute('SELECT "FIELDNAME" FROM _dd03l WHERE "TABNAME"=?', (tabname,)).fetchall()
+    c.close()
+    return {r[0] for r in rows if r[0]}
+
 def _read_dd03l():
     """Return {rows, tabnames, uploadedAt, filename} from harness.db or None."""
     c = harness_db()
@@ -230,9 +244,10 @@ def _read_dd03l():
     rows = [dict(zip(_DD03L_ALL_COLS, r)) for r in raw]
     tabnames = sorted({r['TABNAME'] for r in rows if r.get('TABNAME')})
     return {'rows': rows, 'tabnames': tabnames,
-            'uploadedAt': meta.get('uploadedAt'), 'filename': meta.get('filename')}
+            'uploadedAt': meta.get('uploadedAt'), 'filename': meta.get('filename'),
+            'system': meta.get('system'), 'client': meta.get('client'), 'date': meta.get('date')}
 
-def _write_dd03l(slim, filename):
+def _write_dd03l(slim, filename, system='', client='', date=''):
     """Merge slim rows into _dd03l, replacing rows for tables present in slim."""
     uploaded_tabnames = {r['TABNAME'] for r in slim}
     ph = ','.join('?' * len(uploaded_tabnames))
@@ -248,6 +263,9 @@ def _write_dd03l(slim, filename):
     c.execute('INSERT OR REPLACE INTO _dd03l_meta VALUES (?,?)',
               ('uploadedAt', datetime.utcnow().isoformat() + 'Z'))
     c.execute('INSERT OR REPLACE INTO _dd03l_meta VALUES (?,?)', ('filename', filename))
+    c.execute('INSERT OR REPLACE INTO _dd03l_meta VALUES (?,?)', ('system', system))
+    c.execute('INSERT OR REPLACE INTO _dd03l_meta VALUES (?,?)', ('client', client))
+    c.execute('INSERT OR REPLACE INTO _dd03l_meta VALUES (?,?)', ('date', date))
     c.commit(); c.close()
 
 # ───────────── STATUS ─────────────
@@ -259,7 +277,9 @@ def status():
     if dd03l:
         dd03l_info = {'loaded': True, 'rows': len(dd03l.get('rows', [])),
                       'uploadedAt': dd03l.get('uploadedAt'), 'filename': dd03l.get('filename'),
-                      'tabnames': dd03l.get('tabnames', [])}
+                      'tabnames': dd03l.get('tabnames', []),
+                      'system': dd03l.get('system'), 'client': dd03l.get('client'),
+                      'date': dd03l.get('date')}
     dd04t_info = _dd04t_info()
     dd08l_info = _dd08l_info()
     current_project = 'Dev' if NO_AUTH else session.get('project')
@@ -302,8 +322,17 @@ def _parse_wb(fileobj):
 def up_dd03l():
     f = request.files.get('file')
     if not f: return jsonify(error='no_file'), 400
-    rows, _ = _parse_wb(f)
+    rows, raw_headers = _parse_wb(f)
     rows = [{_DD03L_HEADER_MAP.get(k, k): v for k, v in r.items()} for r in rows]
+    # Validate columns: ≥95% of headers must be recognised DD03L field names
+    dd03l_fields = set(_DD03L_ALL_COLS)
+    mapped_headers = [_DD03L_HEADER_MAP.get(h, h) for h in raw_headers if h]
+    matched = [h for h in mapped_headers if h in dd03l_fields]
+    if not mapped_headers or len(matched) / len(mapped_headers) < 0.95:
+        unmatched = [h for h in mapped_headers if h not in dd03l_fields][:10]
+        return jsonify(error='invalid_dd03l_columns',
+                       hint=f'File does not look like a DD03L extract. '
+                            f'Unrecognized columns: {", ".join(unmatched) or "none matched"}'), 400
     slim = []
     for r in rows:
         tn = str(r.get('TABNAME', '')).strip()
@@ -312,7 +341,9 @@ def up_dd03l():
         slim.append({k: (str(v).strip() if v is not None else '') for k, v in r.items()})
     if not slim:
         return jsonify(error='no_valid_rows'), 400
-    _write_dd03l(slim, f.filename)
+    m = FNAME_RE.match(f.filename)
+    system, client, date = (m.group(2).upper(), m.group(3), m.group(4)) if m else ('', '', '')
+    _write_dd03l(slim, f.filename, system, client, date)
     _reenrich_all()
     c = harness_db()
     total = c.execute('SELECT COUNT(*) FROM _dd03l').fetchone()[0]
@@ -324,11 +355,28 @@ def up_dd03l():
 @app.post('/api/upload/dd04t')
 @login_required
 def up_dd04t():
+    if not _dd03l_initialized():
+        return jsonify(error='dd03l_self_missing',
+                       hint='Upload a DD03L extract containing DD03L field definitions (TABNAME=DD03L) first.'), 400
     f = request.files.get('file')
     if not f: return jsonify(error='no_file'), 400
     tmp_xlsx = os.path.join(DATA, f'_dd04t_upload_{secrets.token_hex(4)}.xlsx')
     f.save(tmp_xlsx)
     original_name = f.filename
+
+    # Validate headers against DD04T field definitions in _dd03l (100% match required)
+    dd04t_fields = _dd03l_fields('DD04T')
+    if dd04t_fields:
+        wb_check = load_workbook(tmp_xlsx, read_only=True, data_only=True)
+        ws_check = wb_check[wb_check.sheetnames[0]]
+        file_headers = [str(x).strip() for x in next(ws_check.iter_rows(values_only=True)) if x is not None and str(x).strip()]
+        wb_check.close()
+        unmatched = [h for h in file_headers if h not in dd04t_fields]
+        if unmatched:
+            try: os.remove(tmp_xlsx)
+            except OSError: pass
+            return jsonify(error='invalid_dd04t_columns',
+                           hint=f'Column mismatch (100% required). Unrecognized: {", ".join(unmatched[:10])}'), 400
 
     def gen():
         c = None
@@ -376,6 +424,10 @@ def up_dd04t():
                       ('uploadedAt', datetime.utcnow().isoformat() + 'Z'))
             c.execute('INSERT OR REPLACE INTO dd04t_meta VALUES (?,?)', ('filename', original_name))
             c.execute('INSERT OR REPLACE INTO dd04t_meta VALUES (?,?)', ('rows', str(n)))
+            fm = FNAME_RE.match(original_name)
+            c.execute('INSERT OR REPLACE INTO dd04t_meta VALUES (?,?)', ('system', fm.group(2).upper() if fm else ''))
+            c.execute('INSERT OR REPLACE INTO dd04t_meta VALUES (?,?)', ('client', fm.group(3) if fm else ''))
+            c.execute('INSERT OR REPLACE INTO dd04t_meta VALUES (?,?)', ('date', fm.group(4) if fm else ''))
             c.commit(); c.close(); c = None
             _reenrich_all()
             yield json.dumps({'event': 'done', 'ok': True, 'rows': n}) + '\n'
@@ -401,7 +453,8 @@ def _dd04t_info():
     rows = int(m.get('rows', 0))
     if rows == 0: return None
     return {'loaded': True, 'rows': rows,
-            'uploadedAt': m.get('uploadedAt'), 'filename': m.get('filename')}
+            'uploadedAt': m.get('uploadedAt'), 'filename': m.get('filename'),
+            'system': m.get('system'), 'client': m.get('client'), 'date': m.get('date')}
 
 def _dd04t_lookup(rollnames, textfield):
     """Return {rollname: text} for given set of rollnames."""
@@ -471,7 +524,8 @@ def _dd08l_info():
     rows = int(m.get('rows', 0))
     if rows == 0: return None
     return {'loaded': True, 'rows': rows,
-            'uploadedAt': m.get('uploadedAt'), 'filename': m.get('filename')}
+            'uploadedAt': m.get('uploadedAt'), 'filename': m.get('filename'),
+            'system': m.get('system'), 'client': m.get('client'), 'date': m.get('date')}
 
 def _dd08l_lookup(checktable):
     """Return the text-table TABNAME for a given check table (FRKART=TEXT), or None."""
@@ -487,9 +541,20 @@ def _dd08l_lookup(checktable):
 @app.post('/api/upload/dd08l')
 @login_required
 def up_dd08l():
+    if not _dd03l_initialized():
+        return jsonify(error='dd03l_self_missing',
+                       hint='Upload a DD03L extract containing DD03L field definitions (TABNAME=DD03L) first.'), 400
     f = request.files.get('file')
     if not f: return jsonify(error='no_file'), 400
-    rows, _ = _parse_wb(f)
+    rows, file_headers = _parse_wb(f)
+    # Validate headers against DD08L field definitions in _dd03l (100% match required)
+    dd08l_fields = _dd03l_fields('DD08L')
+    if dd08l_fields:
+        non_empty_headers = [h for h in file_headers if h]
+        unmatched = [h for h in non_empty_headers if h not in dd08l_fields]
+        if unmatched:
+            return jsonify(error='invalid_dd08l_columns',
+                           hint=f'Column mismatch (100% required). Unrecognized: {", ".join(unmatched[:10])}'), 400
     _DD08L_FIXED = {'CHECKTABLE', 'TABNAME', 'FRKART', 'FIELDNAME'}
     batch = []
     for r in rows:
@@ -509,6 +574,10 @@ def up_dd08l():
               ('uploadedAt', datetime.utcnow().isoformat() + 'Z'))
     c.execute('INSERT OR REPLACE INTO _dd08l_meta VALUES (?,?)', ('filename', f.filename))
     c.execute('INSERT OR REPLACE INTO _dd08l_meta VALUES (?,?)', ('rows', str(len(batch))))
+    fm = FNAME_RE.match(f.filename)
+    c.execute('INSERT OR REPLACE INTO _dd08l_meta VALUES (?,?)', ('system', fm.group(2).upper() if fm else ''))
+    c.execute('INSERT OR REPLACE INTO _dd08l_meta VALUES (?,?)', ('client', fm.group(3) if fm else ''))
+    c.execute('INSERT OR REPLACE INTO _dd08l_meta VALUES (?,?)', ('date', fm.group(4) if fm else ''))
     c.commit(); c.close()
     return jsonify(ok=True, rows=len(batch))
 
@@ -541,50 +610,45 @@ def up_trans():
         if all(v is None or v == '' for v in r): continue
         rows.append({h: ('' if v is None else v) for h, v in zip(headers, r)})
 
-    # Column validation
-    dd03l = _read_dd03l()
-    if not dd03l:
-        return jsonify(error='dd03l_required',
-                       hint='DD03L is not loaded. Upload DD03L before uploading any table.'), 400
-    tbl_fields = {r['FIELDNAME'] for r in dd03l.get('rows', [])
-                  if r.get('TABNAME') == table and r.get('FIELDNAME')}
-    if not tbl_fields:
-        is_dd03l_self = (
-            table == 'DD03L' and bool(rows) and
-            all(str(r.get('TABNAME', '')).strip().upper() == 'DD03L' for r in rows)
-        )
-        if not is_dd03l_self:
-            return jsonify(error='table_not_in_dd03l',
-                           hint=f'No entries found in DD03L for table {table}. '
-                                f'Upload the DD03L extract containing {table} first.'), 400
-    else:
-        threshold = 1.0 if table == 'DD03L' else 0.95
-        non_empty_headers = [h for h in headers if h]
-        matched_headers   = [h for h in non_empty_headers if h in tbl_fields]
-        unmatched_headers = [(headers.index(h) + 1, h) for h in non_empty_headers if h not in tbl_fields]
-        if not non_empty_headers or len(matched_headers) / len(non_empty_headers) < threshold:
-            sample = [f'col {col} "{name}"' for col, name in unmatched_headers[:10]]
-            return jsonify(error='non_technical_columns', table=table,
-                           matched=len(matched_headers), total=len(non_empty_headers),
-                           unmatched_sample=sample,
-                           hint='Column headers must be SAP technical field names. '
-                                'Re-export from SE16N using technical column names.'), 400
-
     enriched_columns = _enrich_columns(table, headers)
 
-    # Dynamic table: DROP + CREATE + INSERT
+    # Dynamic table: CREATE IF NOT EXISTS + upsert (INSERT OR REPLACE)
     non_empty = [h for h in headers if h]
-    col_defs  = ', '.join(f'"{h}" TEXT' for h in non_empty)
-    col_list  = ', '.join(f'"{h}"' for h in non_empty)
     val_marks = ', '.join('?' * len(non_empty))
+    col_list  = ', '.join(f'"{h}"' for h in non_empty)
+
+    # Determine key fields from DD03L (KEYFLAG='X') to build PRIMARY KEY
+    key_fields = []
+    try:
+        kc = harness_db()
+        key_fields = [
+            r[0] for r in kc.execute(
+                'SELECT FIELDNAME FROM _dd03l WHERE TABNAME=? AND KEYFLAG=?',
+                (table, 'X')
+            ).fetchall()
+            if r[0] in non_empty
+        ]
+        kc.close()
+    except Exception:
+        pass
+
+    if key_fields:
+        pk_clause = f', PRIMARY KEY ({", ".join(chr(34)+k+chr(34) for k in key_fields)})'
+    else:
+        pk_clause = ''
+    col_defs = ', '.join(f'"{h}" TEXT' for h in non_empty) + pk_clause
 
     c = harness_db()
     c.execute('BEGIN')
-    c.execute(f'DROP TABLE IF EXISTS "{table}"')
-    c.execute(f'CREATE TABLE "{table}" ({col_defs})')
+    c.execute(f'CREATE TABLE IF NOT EXISTS "{table}" ({col_defs})')
+    # Add any new columns that exist in the file but not yet in the table
+    existing_cols = {row[1] for row in c.execute(f'PRAGMA table_info("{table}")')}
+    for h in non_empty:
+        if h not in existing_cols:
+            c.execute(f'ALTER TABLE "{table}" ADD COLUMN "{h}" TEXT')
     if rows:
         c.executemany(
-            f'INSERT INTO "{table}" ({col_list}) VALUES ({val_marks})',
+            f'INSERT OR REPLACE INTO "{table}" ({col_list}) VALUES ({val_marks})',
             [tuple(r.get(h, '') for h in non_empty) for r in rows]
         )
     c.execute('''
@@ -596,8 +660,8 @@ def up_trans():
           json.dumps(headers), json.dumps(enriched_columns)))
     c.commit(); c.close()
 
-    # Self-describing DD03L: also update _dd03l reference
-    if table == 'DD03L' and not tbl_fields:
+    # DD03L file: always update _dd03l reference (rows may describe any TABNAME)
+    if table == 'DD03L':
         norm = [{_DD03L_HEADER_MAP.get(k, k): v for k, v in r.items()} for r in rows]
         slim = []
         for r in norm:
@@ -716,6 +780,27 @@ def del_data(table):
     c.execute('BEGIN')
     c.execute(f'DROP TABLE IF EXISTS "{table}"')
     c.execute('DELETE FROM _table_meta WHERE tablename=?', (table,))
+    c.commit(); c.close()
+    return jsonify(ok=True)
+
+@app.delete('/api/reference/<name>')
+@login_required
+def del_reference(name):
+    name = name.lower()
+    c = harness_db()
+    c.execute('BEGIN')
+    if name == 'dd03l':
+        c.execute('DELETE FROM _dd03l')
+        c.execute('DELETE FROM _dd03l_meta')
+    elif name == 'dd04t':
+        c.execute('DELETE FROM dd04t')
+        c.execute('DELETE FROM dd04t_meta')
+    elif name == 'dd08l':
+        c.execute('DELETE FROM _dd08l')
+        c.execute('DELETE FROM _dd08l_meta')
+    else:
+        c.close()
+        return jsonify(error='unknown_reference'), 400
     c.commit(); c.close()
     return jsonify(ok=True)
 
