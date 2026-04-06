@@ -35,20 +35,6 @@
       color: var(--accent); text-shadow: var(--glow);
     }
     #topbar .logo span { color: var(--accent2); }
-    #topbar .status-row { display: flex; gap: 24px; font-size: 11px; color: var(--text-dim); }
-    #topbar .status-row .dot {
-      display: inline-block; width: 7px; height: 7px; border-radius: 50%;
-      margin-right: 5px; background: var(--text-dim);
-    }
-    #topbar .status-row .dot.on { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
-    #topbar .right { display: flex; align-items: center; gap: 16px; }
-    #topbar .user { font-size: 11px; color: var(--text-dim); }
-    #topbar .user span { color: var(--text); }
-    #topbar .logout {
-      font-size: 10px; letter-spacing: 2px; color: var(--text-dim);
-      cursor: pointer; text-transform: uppercase; transition: color .2s;
-    }
-    #topbar .logout:hover { color: var(--danger); }
     #topbar .clock { font-size: 13px; color: var(--accent); letter-spacing: 2px; }
 
     #layout {
@@ -64,65 +50,6 @@
     .panel-header .ph-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: var(--glow); }
     .panel-body { flex: 1; overflow: auto; padding: 14px; }
     #panel-control { grid-row: 1 / 3; }
-
-    .ref-slot {
-      display: flex; align-items: center; gap: 10px;
-      padding: 10px 12px; border: 1px solid var(--border);
-      border-radius: 4px; margin-bottom: 8px; cursor: pointer;
-      transition: all .2s;
-    }
-    .ref-slot:hover { border-color: var(--accent); background: rgba(74,222,128,0.06); }
-    .ref-slot.loaded { border-color: var(--accent2); }
-    .ref-slot .rs-light {
-      width: 10px; height: 10px; border-radius: 50%;
-      background: var(--text-dim); flex-shrink: 0;
-    }
-    .ref-slot.loaded .rs-light { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
-    .ref-slot .rs-main { flex: 1; min-width: 0; }
-    .ref-slot .rs-title {
-      font-size: 10px; letter-spacing: 2px; text-transform: uppercase;
-      color: var(--accent); margin-bottom: 2px;
-    }
-    .ref-slot.loaded .rs-title { color: var(--accent2); }
-    .ref-slot .rs-sub { font-size: 10px; color: var(--text-dim); word-break: break-all; }
-    .ref-slot .rs-replace {
-      font-size: 9px; color: var(--text-dim); letter-spacing: 1px;
-      text-transform: uppercase; padding: 2px 6px;
-      border: 1px solid var(--border); border-radius: 3px;
-    }
-    .ref-slot:hover .rs-replace { color: var(--accent); border-color: var(--accent); }
-
-    #trans-list, #config-list { margin-bottom: 6px; }
-    #trans-list table, #config-list table { width: 100%; border-collapse: collapse; font-size: 10px; }
-    #trans-list thead th, #config-list thead th {
-      text-align: left; padding: 4px 6px; letter-spacing: 1px; color: var(--text-dim);
-      border-bottom: 1px solid var(--border); font-weight: normal; text-transform: uppercase;
-    }
-    #trans-list tbody tr, #config-list tbody tr { cursor: pointer; transition: background .12s; }
-    #trans-list tbody tr:hover, #config-list tbody tr:hover { background: rgba(74,222,128,0.06); }
-    #trans-list tbody tr.active, #config-list tbody tr.active { background: rgba(74,222,128,0.1); }
-    #trans-list tbody tr.active td, #config-list tbody tr.active td { color: var(--accent2); }
-    #trans-list td, #config-list td { padding: 5px 6px; border-bottom: 1px solid rgba(255,255,255,0.04); }
-    #trans-list td:nth-last-child(2), #config-list td:nth-last-child(2) { color: var(--accent); text-align: right; }
-    .del-btn, .del-ref-btn {
-      background: none; border: 1px solid transparent; color: var(--text-dim); cursor: pointer;
-      font-size: 9px; padding: 2px 6px; border-radius: 3px; letter-spacing: 1px;
-      font-family: inherit; transition: color .15s, background .15s, border-color .15s;
-    }
-    .del-btn:hover, .del-ref-btn:hover { color: var(--danger); border-color: var(--danger); background: rgba(224,96,96,0.10); }
-
-    .upload-zone {
-      border: 2px dashed var(--border); border-radius: 6px;
-      padding: 18px 12px; text-align: center; cursor: pointer;
-      transition: all .2s; font-size: 11px; color: var(--text-dim);
-      margin-bottom: 10px;
-    }
-    .upload-zone:hover, .upload-zone.drag-over {
-      border-color: var(--accent); color: var(--accent);
-      background: rgba(74,222,128,0.05);
-    }
-    .upload-zone .uz-icon { font-size: 22px; margin-bottom: 6px; }
-    .upload-zone .uz-hint { font-size: 9px; opacity: .7; margin-top: 4px; letter-spacing: 1px; }
 
     .ctrl-section { margin-bottom: 14px; }
     .ctrl-label {
@@ -167,14 +94,6 @@
       min-width: 110px; font-size: 11px;
     }
     .col-list-item .cli-desc { color: var(--text-dim); font-size: 11px; flex: 1; }
-    .col-list-item .cli-unmatched { color: var(--text-dim); font-style: italic; }
-    .col-list-empty { padding: 14px; color: var(--text-dim); font-size: 11px; text-align: center; }
-    .cli-describe {
-      background: transparent; border: 1px solid var(--border); color: var(--text-dim);
-      font-size: 11px; line-height: 1; cursor: pointer; padding: 1px 5px; border-radius: 3px;
-      font-family: inherit; transition: all .15s; flex-shrink: 0; margin-left: auto;
-    }
-    .cli-describe:hover { border-color: var(--accent); color: var(--accent); }
     .col-list-count { font-size: 10px; color: var(--text-dim); margin-top: 4px; letter-spacing: 1px; }
     .stat-box {
       background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
@@ -253,41 +172,13 @@
 
 <div id="topbar">
   <div class="logo">HARNESS <span>//</span> SAPCONS</div>
-  <div class="status-row">
-    <div><span class="dot" id="dot-dd03l"></span><span id="st-dd03l">DD03L: —</span></div>
-    <div><span class="dot" id="dot-dd04t"></span><span id="st-dd04t">DD04T: —</span></div>
-    <div><span class="dot" id="dot-dd08l"></span><span id="st-dd08l">DD08L: —</span></div>
-    <div><span class="dot" id="dot-table"></span><span id="st-table">TABLE: —</span></div>
-    <div><span class="dot" id="dot-nodes"></span><span id="st-nodes">0 NODES</span></div>
-    <div><span class="dot" id="dot-edges"></span><span id="st-edges">0 LINKS</span></div>
-  </div>
-  <div class="right">
-    <div class="user">project: <span id="proj-name">—</span></div>
-    <div class="user">user: <span id="user-email">—</span></div>
-    <div class="logout" id="btn-logout">Logout</div>
-    <div class="clock" id="clock">--:--:--</div>
-  </div>
+  <div class="clock" id="clock">--:--:--</div>
 </div>
 
 <div id="layout">
   <div class="panel" id="panel-control">
     <div class="panel-header"><div class="ph-dot"></div>CONTROL PANEL</div>
     <div class="panel-body">
-
-      <div class="upload-zone" id="zone-trans">
-        <div class="uz-icon">⬆</div>
-        <div>Drop .xlsx here or click to upload</div>
-        <div class="uz-hint">TABLE_SYSTEM_CLIENT_YYYYMMDD.xlsx</div>
-        <input type="file" id="file-trans" accept=".xlsx,.xls" hidden>
-      </div>
-
-      <div class="ctrl-label" style="margin-bottom:8px;margin-top:14px">Configuration Tables</div>
-      <div id="config-list"></div>
-
-      <div class="ctrl-label" style="margin-bottom:8px;margin-top:14px">Transactional Tables</div>
-      <div id="trans-list"></div>
-      <select id="sel-table" style="display:none"></select>
-
     </div>
   </div>
 
@@ -296,8 +187,7 @@
     <div class="panel-body" style="padding:0;position:relative;">
       <div class="empty-state" id="graph-empty">
         <div class="es-icon">◈</div>
-        <div id="empty-msg">Load a table to begin</div>
-        <div style="opacity:.5;font-size:10px">Upload transactional file to begin</div>
+        <div>Load a table to begin</div>
       </div>
       <svg id="graph-svg" style="display:none"></svg>
     </div>
@@ -330,7 +220,6 @@
 function tick() { document.getElementById('clock').textContent = new Date().toTimeString().slice(0,8); }
 tick(); setInterval(tick, 1000);
 
-// type: 'ok' | 'warn' | 'err'
 function toast(msg, type = 'ok') {
   const overlay = document.getElementById('modal-overlay');
   const box = document.getElementById('modal-box');
@@ -341,208 +230,7 @@ function toast(msg, type = 'ok') {
 }
 
 let rows = [], columns = [], simulation = null;
-let serverStatus = null;
 let currentTable = null;
-
-async function checkAuth() {
-  const r = await fetch('/api/auth/me');
-  const d = await r.json();
-  if (!d.authed) { window.location.href = '/login'; return false; }
-  if (!d.project) { window.location.href = '/login?step=project'; return false; }
-  document.getElementById('user-email').textContent = d.email;
-  document.getElementById('proj-name').textContent = d.project;
-  return true;
-}
-document.getElementById('btn-logout').addEventListener('click', async () => {
-  await fetch('/api/auth/logout', { method: 'POST' });
-  window.location.href = '/login';
-});
-
-async function refreshStatus() {
-  const r = await fetch('/api/status');
-  if (!r.ok) return;
-  const s = await r.json();
-  serverStatus = s;
-  setDot('dd03l', !!s.dd03l, s.dd03l ? `DD03L: ${s.dd03l.rows}r` : 'DD03L: —');
-  setDot('dd04t', !!s.dd04t, s.dd04t ? `DD04T: ${s.dd04t.rows}r` : 'DD04T: —');
-  setDot('dd08l', !!s.dd08l, s.dd08l ? `DD08L: ${s.dd08l.rows}r` : 'DD08L: —');
-  const prevTable = document.getElementById('sel-table').value;
-  const sel = document.getElementById('sel-table');
-
-  const allTables = s.tables || [];
-  sel.innerHTML = allTables.map(t => `<option value="${t.name}">${t.name}</option>`).join('');
-  if (prevTable && [...sel.options].some(o => o.value === prevTable)) sel.value = prevTable;
-
-  renderRefList(s);
-  renderTableList('trans-list', allTables, sel);  // all transactional tables (no DD* filter)
-}
-
-function renderRefList(s) {
-  const list = document.getElementById('config-list');
-  const refs = [
-    { key: 'dd03l', label: 'DD03L', info: s.dd03l },
-    { key: 'dd04t', label: 'DD04T', info: s.dd04t },
-    { key: 'dd08l', label: 'DD08L', info: s.dd08l },
-  ];
-  const loaded = refs.filter(r => r.info);
-  if (!loaded.length) { list.innerHTML = ''; return; }
-  list.innerHTML = `<table>
-    <thead><tr><th>Table</th><th>System</th><th>Client</th><th>Date</th><th>Entries</th><th></th></tr></thead>
-    <tbody>${loaded.map(r => `
-      <tr>
-        <td>${r.label}</td>
-        <td>${r.info.system||'—'}</td>
-        <td>${r.info.client||'—'}</td>
-        <td>${r.info.date ? r.info.date.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3') : '—'}</td>
-        <td>${r.info.rows}</td>
-        <td><button class="del-ref-btn" data-key="${r.key}" data-label="${r.label}">DELETE</button></td>
-      </tr>`).join('')}
-    </tbody></table>`;
-  list.querySelectorAll('.del-ref-btn').forEach(btn => {
-    btn.addEventListener('click', async () => {
-      const r = await fetch(`/api/reference/${btn.dataset.key}`, { method: 'DELETE' });
-      if (r.ok) { await refreshStatus(); toast(`${btn.dataset.label} cleared`); }
-      else { toast('Delete failed', 'err'); }
-    });
-  });
-}
-
-function renderTableList(listId, tables, sel) {
-  const list = document.getElementById(listId);
-  if (!tables.length) { list.innerHTML = ''; return; }
-  list.innerHTML = `<table>
-    <thead><tr><th>Table</th><th>System</th><th>Client</th><th>Date</th><th>Entries</th><th></th></tr></thead>
-    <tbody>${tables.map(t => `
-      <tr data-table="${t.name}" class="${currentTable === t.name ? 'active' : ''}">
-        <td>${t.name}</td><td>${t.system||'—'}</td><td>${t.client||'—'}</td>
-        <td>${t.date ? t.date.replace(/(\d{4})(\d{2})(\d{2})/, '$1-$2-$3') : '—'}</td>
-        <td>${t.rows}</td>
-        <td><button class="del-btn" data-table="${t.name}">DELETE</button></td>
-      </tr>`).join('')}
-    </tbody></table>`;
-  list.querySelectorAll('tbody tr').forEach(row => {
-    row.addEventListener('click', () => {
-      sel.value = row.dataset.table;
-      loadAndRender();
-    });
-  });
-  list.querySelectorAll('.del-btn').forEach(btn => {
-    btn.addEventListener('click', async e => {
-      e.stopPropagation();
-      const table = btn.dataset.table;
-      const r = await fetch(`/api/data/${table}`, { method: 'DELETE' });
-      if (r.ok) {
-        if (currentTable === table) { currentTable = null; rows = []; columns = []; renderTable(); }
-        await refreshStatus();
-        toast(`${table} deleted`);
-      } else {
-        toast('Delete failed', 'err');
-      }
-    });
-  });
-}
-
-
-const fileTrans = document.getElementById('file-trans');
-const FNAME_RE = /^([A-Z0-9]+)_([A-Z0-9]+)_(\d+)_(\d{8})\.xlsx?$/i;
-
-const zone = document.getElementById('zone-trans');
-zone.addEventListener('click', () => fileTrans.click());
-zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('drag-over'); });
-zone.addEventListener('dragleave', () => zone.classList.remove('drag-over'));
-zone.addEventListener('drop', e => {
-  e.preventDefault(); zone.classList.remove('drag-over');
-  if (e.dataTransfer.files[0]) uploadFile(e.dataTransfer.files[0]);
-});
-fileTrans.addEventListener('change', e => {
-  if (e.target.files[0]) uploadFile(e.target.files[0]);
-  e.target.value = '';
-});
-
-async function uploadFile(file) {
-  if (!FNAME_RE.test(file.name)) {
-    toast(`bad filename — expected TABLE_SYSTEM_CLIENT_YYYYMMDD.xlsx`, 'err'); return;
-  }
-  const prefix = file.name.split('_')[0].toUpperCase();
-  if (prefix === 'DD04T') { await uploadDD04T(file); return; }
-  if (prefix === 'DD08L') { await uploadRef(file, '/api/upload/dd08l', 'DD08L'); return; }
-  if (prefix === 'DD03L') { await uploadRef(file, '/api/upload/dd03l', 'DD03L'); return; }
-  await uploadTrans(file);
-}
-
-async function uploadRef(file, endpoint, label) {
-  toast(`uploading ${label}…`);
-  const fd = new FormData(); fd.append('file', file);
-  try {
-    const r = await fetch(endpoint, { method: 'POST', body: fd });
-    const d = await r.json();
-    if (!r.ok) { toast(d.hint || `error: ${d.error}`, 'err'); return; }
-    toast(`${label}: ${d.rows} rows loaded`);
-    await refreshStatus();
-  } catch (e) { toast('upload error: ' + e.message, 'err'); }
-}
-
-async function uploadDD04T(file) {
-  toast('uploading DD04T… (large file, please wait)');
-  const fd = new FormData(); fd.append('file', file);
-  try {
-    const r = await fetch('/api/upload/dd04t', { method: 'POST', body: fd });
-    if (!r.body) { toast('Streaming not supported by browser', 'err'); return; }
-    const reader = r.body.getReader(); const dec = new TextDecoder(); let buf = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const lines = buf.split('\n'); buf = lines.pop();
-      for (const line of lines) {
-        if (!line.trim()) continue;
-        try {
-          const d = JSON.parse(line);
-          if (d.event === 'progress') toast(`DD04T: ${d.rows} rows…`);
-          if (d.event === 'done') { await refreshStatus(); toast(`DD04T: ${d.rows} rows loaded`); }
-          if (d.event === 'error') toast(`DD04T error: ${d.error}`, 'err');
-        } catch {}
-      }
-    }
-  } catch (e) { toast('upload error: ' + e.message, 'err'); }
-}
-
-async function uploadTrans(file) {
-  toast(`uploading ${file.name}…`);
-  const fd = new FormData(); fd.append('file', file);
-  try {
-    const r = await fetch('/api/upload/trans', { method: 'POST', body: fd });
-    const d = await r.json();
-    if (!r.ok) {
-      if (d.error === 'non_technical_columns') {
-        toast(`rejected: only ${d.matched}/${d.total} columns are valid ${d.table} field names. ` +
-              `Unknown: ${(d.unmatched_sample||[]).join(', ')}. Re-export with technical names.`, 'err');
-      } else {
-        toast(d.hint || `error: ${d.error}`, 'err');
-      }
-      return;
-    }
-    toast(`${d.table}: ${d.rows} rows uploaded`);
-    await refreshStatus();
-    document.getElementById('sel-table').value = d.table;
-    loadAndRender();
-  } catch (e) { toast('upload error: ' + e.message, 'err'); }
-}
-
-async function loadAndRender() {
-  const table = document.getElementById('sel-table').value;
-  if (!table) return;
-  const r = await fetch(`/api/data/${table}`);
-  if (!r.ok) { toast('load failed', 'err'); return; }
-  const d = await r.json();
-  rows = d.rows; columns = d.columns; currentTable = table;
-  document.querySelectorAll('#trans-list tbody tr, #config-list tbody tr').forEach(row => {
-    row.classList.toggle('active', row.dataset.table === table);
-  });
-  setDot('table', true, `TABLE: ${table}`);
-  renderTable();
-}
-
 
 function renderTable() {
   document.getElementById('table-empty').style.display = 'none';
@@ -552,57 +240,16 @@ function renderTable() {
   let html = '<table><thead><tr>';
   columns.forEach(c => { html += `<th title="${c}">${c}</th>`; });
   html += '</tr></thead><tbody>';
-  preview.forEach((r,i) => {
+  preview.forEach((r, i) => {
     html += `<tr data-i="${i}">`;
     columns.forEach(c => { html += `<td>${r[c] ?? ''}</td>`; });
     html += '</tr>';
   });
   if (rows.length > 200)
-    html += `<tr><td colspan="${columns.length}" style="text-align:center;color:var(--text-dim);padding:10px">… ${rows.length-200} more rows</td></tr>`;
+    html += `<tr><td colspan="${columns.length}" style="text-align:center;color:var(--text-dim);padding:10px">… ${rows.length - 200} more rows</td></tr>`;
   html += '</tbody></table>';
   wrap.innerHTML = html;
 }
-
-function setDot(key, on, text) {
-  const dot = document.getElementById(`dot-${key}`);
-  const txt = document.getElementById(`st-${key}`);
-  if (dot) dot.className = 'dot' + (on?' on':'');
-  if (txt) txt.textContent = text;
-}
-
-async function describeColumn(field) {
-  if (!currentTable) return;
-  const descCol = `${field} - Description`;
-  if (columns.includes(descCol)) { toast(`${descCol} already added`); return; }
-  toast(`looking up ${field} descriptions…`);
-  try {
-    const r = await fetch(`/api/data/${currentTable}/describe`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({field})
-    });
-    const d = await r.json();
-    if (!r.ok) { toast(d.hint || d.error, 'err'); return; }
-    if (d.warning) toast(`The required table does not have the respective entries, please upload ${d.text_table}.`, 'warn');
-    // Find source column (may be enriched: "FIELD - Label" or just "FIELD")
-    const srcIdx = columns.findIndex(c => c === field || c.startsWith(field + ' - '));
-    if (srcIdx < 0) { toast(`column ${field} not found`, 'err'); return; }
-    const srcCol = columns[srcIdx];
-    // Insert description column immediately after source column
-    columns.splice(srcIdx + 1, 0, descCol);
-    const values = d.values || {};
-    for (const row of rows) {
-      const rawVal = String(row[srcCol] ?? '').trim();
-      row[descCol] = values[rawVal] || '';
-    }
-    renderTable();
-    const resolved = Object.keys(values).length;
-    toast(`${descCol} added · ${resolved} value${resolved !== 1 ? 's' : ''} resolved` +
-          (d.text_table ? ` from ${d.text_table}` : ''));
-  } catch(e) { toast('error: ' + e.message, 'err'); }
-}
-
-(async () => { if (await checkAuth()) await refreshStatus(); })();
 </script>
 </body>
 </html>
