@@ -25,10 +25,18 @@ _DD03L_HEADER_MAP = {
     'Output': 'OUTPUTSTYLE', 'SRS Identifier': 'SRS_ID',
 }
 
+# All columns stored in _dd03l (fixed schema)
+_DD03L_ALL_COLS = [
+    'TABNAME', 'FIELDNAME', 'ROLLNAME', 'CHECKTABLE', 'KEYFLAG', 'MANDATORY',
+    'DATATYPE', 'LENG', 'DECIMALS', 'INTTYPE', 'INTLEN', 'POSITION', 'DBPOSITION',
+    'AS4LOCAL', 'AS4VERS', 'ADMINFIELD', 'REFTABLE', 'PRECFIELD', 'REFFIELD',
+    'CONROUT', 'NOTNULL', 'DOMNAME', 'SHLPORIGIN', 'TABLETYPE', 'DEPTH',
+    'COMPTYPE', 'REFTYPE', 'LANGUFLAG', 'ANONYMOUS', 'OUTPUTSTYLE', 'SRS_ID',
+]
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 DATA = os.environ.get('HARNESS_DATA', os.path.join(HERE, 'data'))
-os.makedirs(os.path.join(DATA, 'reference'), exist_ok=True)
-os.makedirs(os.path.join(DATA, 'transactional'), exist_ok=True)
+os.makedirs(DATA, exist_ok=True)
 
 app = Flask(__name__, static_folder=HERE, static_url_path='')
 app.secret_key = os.environ.get('HARNESS_SECRET', secrets.token_hex(32))
@@ -41,7 +49,7 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 NO_AUTH = os.environ.get('HARNESS_NO_AUTH', '').strip() in ('1', 'true', 'yes')
 DEV_EMAIL = 'dev@harness.local'
 
-# ───────────── DB ─────────────
+# ───────────── AUTH DB (users.db) ─────────────
 def db():
     c = sqlite3.connect(os.path.join(DATA, 'users.db'))
     c.row_factory = sqlite3.Row
@@ -62,6 +70,56 @@ def init_db():
               ('Dev', datetime.utcnow().isoformat() + 'Z'))
     c.commit(); c.close()
 init_db()
+
+# ───────────── HARNESS DB (harness.db) ─────────────
+HARNESS_DB = os.path.join(DATA, 'harness.db')
+
+def harness_db():
+    c = sqlite3.connect(HARNESS_DB)
+    c.row_factory = sqlite3.Row
+    c.execute('PRAGMA journal_mode=WAL')
+    return c
+
+def init_harness_db():
+    c = harness_db()
+    cols_ddl = ', '.join(
+        f'"{col}" TEXT' if col not in ('TABNAME', 'FIELDNAME') else f'"{col}" TEXT NOT NULL'
+        for col in _DD03L_ALL_COLS
+    )
+    c.executescript(f'''
+        CREATE TABLE IF NOT EXISTS _dd03l (
+            {cols_ddl},
+            PRIMARY KEY ("TABNAME", "FIELDNAME")
+        );
+        CREATE TABLE IF NOT EXISTS _dd03l_meta (k TEXT PRIMARY KEY, v TEXT);
+
+        CREATE TABLE IF NOT EXISTS dd04t (
+            rollname TEXT PRIMARY KEY,
+            SCRTEXT_M TEXT, SCRTEXT_L TEXT, SCRTEXT_S TEXT,
+            DDTEXT TEXT, REPTEXT TEXT
+        );
+        CREATE TABLE IF NOT EXISTS dd04t_meta (k TEXT PRIMARY KEY, v TEXT);
+
+        CREATE TABLE IF NOT EXISTS _dd08l (
+            CHECKTABLE TEXT, TABNAME TEXT, FRKART TEXT, FIELDNAME TEXT,
+            _extra TEXT
+        );
+        CREATE TABLE IF NOT EXISTS _dd08l_meta (k TEXT PRIMARY KEY, v TEXT);
+
+        CREATE TABLE IF NOT EXISTS _table_meta (
+            tablename   TEXT PRIMARY KEY,
+            system      TEXT,
+            client      TEXT,
+            date        TEXT,
+            project     TEXT,
+            filename    TEXT,
+            uploadedAt  TEXT,
+            columns     TEXT,
+            enriched_columns TEXT
+        );
+    ''')
+    c.commit(); c.close()
+init_harness_db()
 
 def login_required(f):
     @wraps(f)
@@ -143,7 +201,7 @@ def set_project():
         if not row:
             c.close()
             return jsonify(error='project_not_found', hint=f'Project "{name}" does not exist'), 404
-        name = row['name']  # use canonical casing from DB
+        name = row['name']
     c.close()
     session['project'] = name
     return jsonify(ok=True, project=name)
@@ -156,16 +214,47 @@ def me():
         return jsonify(authed=False)
     return jsonify(authed=True, email=session.get('email'), project=session.get('project'))
 
-# ───────────── STATUS ─────────────
-def _read_ref(name):
-    p = os.path.join(DATA, 'reference', name)
-    if not os.path.exists(p): return None
-    with open(p) as f: return json.load(f)
+# ───────────── DD03L HELPERS ─────────────
+def _read_dd03l():
+    """Return {rows, tabnames, uploadedAt, filename} from harness.db or None."""
+    c = harness_db()
+    try:
+        meta = dict(c.execute('SELECT k,v FROM _dd03l_meta').fetchall())
+    except sqlite3.OperationalError:
+        c.close(); return None
+    if not meta.get('uploadedAt'):
+        c.close(); return None
+    col_sql = ', '.join(f'"{col}"' for col in _DD03L_ALL_COLS)
+    raw = c.execute(f'SELECT {col_sql} FROM _dd03l').fetchall()
+    c.close()
+    rows = [dict(zip(_DD03L_ALL_COLS, r)) for r in raw]
+    tabnames = sorted({r['TABNAME'] for r in rows if r.get('TABNAME')})
+    return {'rows': rows, 'tabnames': tabnames,
+            'uploadedAt': meta.get('uploadedAt'), 'filename': meta.get('filename')}
 
+def _write_dd03l(slim, filename):
+    """Merge slim rows into _dd03l, replacing rows for tables present in slim."""
+    uploaded_tabnames = {r['TABNAME'] for r in slim}
+    ph = ','.join('?' * len(uploaded_tabnames))
+    col_list = ', '.join(f'"{col}"' for col in _DD03L_ALL_COLS)
+    val_marks = ', '.join('?' * len(_DD03L_ALL_COLS))
+    c = harness_db()
+    c.execute('BEGIN')
+    c.execute(f'DELETE FROM _dd03l WHERE "TABNAME" IN ({ph})', list(uploaded_tabnames))
+    c.executemany(
+        f'INSERT OR REPLACE INTO _dd03l ({col_list}) VALUES ({val_marks})',
+        [tuple(r.get(col, '') for col in _DD03L_ALL_COLS) for r in slim]
+    )
+    c.execute('INSERT OR REPLACE INTO _dd03l_meta VALUES (?,?)',
+              ('uploadedAt', datetime.utcnow().isoformat() + 'Z'))
+    c.execute('INSERT OR REPLACE INTO _dd03l_meta VALUES (?,?)', ('filename', filename))
+    c.commit(); c.close()
+
+# ───────────── STATUS ─────────────
 @app.get('/api/status')
 @login_required
 def status():
-    dd03l = _read_ref('dd03l.json')
+    dd03l = _read_dd03l()
     dd03l_info = None
     if dd03l:
         dd03l_info = {'loaded': True, 'rows': len(dd03l.get('rows', [])),
@@ -174,21 +263,23 @@ def status():
     dd04t_info = _dd04t_info()
     dd08l_info = _dd08l_info()
     current_project = 'Dev' if NO_AUTH else session.get('project')
+    c = harness_db()
+    meta_rows = c.execute(
+        'SELECT tablename, columns, filename, uploadedAt, system, client, date '
+        'FROM _table_meta WHERE project=? ORDER BY tablename',
+        (current_project,)
+    ).fetchall()
     tables = []
-    tdir = os.path.join(DATA, 'transactional')
-    for fn in sorted(os.listdir(tdir)):
-        if fn.endswith('.json'):
-            with open(os.path.join(tdir, fn)) as f:
-                d = json.load(f)
-            if d.get('project') != current_project:
-                continue
-            tables.append({'name': fn[:-5], 'rows': len(d.get('rows', [])),
-                           'columns': len(d.get('columns', [])),
-                           'filename': d.get('filename'),
-                           'uploadedAt': d.get('uploadedAt'),
-                           'system': d.get('system'),
-                           'client': d.get('client'),
-                           'date': d.get('date')})
+    for m in meta_rows:
+        cols = json.loads(m['columns'] or '[]')
+        try:
+            row_count = c.execute(f'SELECT COUNT(*) FROM "{m["tablename"]}"').fetchone()[0]
+        except sqlite3.OperationalError:
+            row_count = 0
+        tables.append({'name': m['tablename'], 'rows': row_count, 'columns': len(cols),
+                       'filename': m['filename'], 'uploadedAt': m['uploadedAt'],
+                       'system': m['system'], 'client': m['client'], 'date': m['date']})
+    c.close()
     return jsonify(dd03l=dd03l_info, dd04t=dd04t_info, dd08l=dd08l_info, tables=tables)
 
 # ───────────── UPLOADS ─────────────
@@ -212,60 +303,44 @@ def up_dd03l():
     f = request.files.get('file')
     if not f: return jsonify(error='no_file'), 400
     rows, _ = _parse_wb(f)
-    # Normalize description headers to technical names if needed
     rows = [{_DD03L_HEADER_MAP.get(k, k): v for k, v in r.items()} for r in rows]
     slim = []
     for r in rows:
         tn = str(r.get('TABNAME', '')).strip()
         fn = str(r.get('FIELDNAME', '')).strip()
         if not tn or not fn: continue
-        # Store all columns from the uploaded DD03L row
-        clean = {k: (str(v).strip() if v is not None else '') for k, v in r.items()}
-        slim.append(clean)
-    uploaded_tabnames = {r['TABNAME'] for r in slim}
-    # Merge: keep rows for tables not in this upload, replace rows for tables that ARE
-    existing = _read_ref('dd03l.json')
-    if existing:
-        kept = [r for r in existing.get('rows', []) if r.get('TABNAME') not in uploaded_tabnames]
-        slim = kept + slim
-    tabnames = sorted({r['TABNAME'] for r in slim})
-    out = {'rows': slim, 'tabnames': tabnames,
-           'uploadedAt': datetime.utcnow().isoformat() + 'Z',
-           'filename': f.filename}
-    with open(os.path.join(DATA, 'reference', 'dd03l.json'), 'w') as o:
-        json.dump(out, o)
+        slim.append({k: (str(v).strip() if v is not None else '') for k, v in r.items()})
+    if not slim:
+        return jsonify(error='no_valid_rows'), 400
+    _write_dd03l(slim, f.filename)
     _reenrich_all()
-    return jsonify(ok=True, rows=len(slim), tabnames=len(tabnames),
-                   merged=list(uploaded_tabnames))
-
-DD04T_DB = os.path.join(DATA, 'reference', 'dd04t.sqlite')
+    c = harness_db()
+    total = c.execute('SELECT COUNT(*) FROM _dd03l').fetchone()[0]
+    tab_count = c.execute('SELECT COUNT(DISTINCT "TABNAME") FROM _dd03l').fetchone()[0]
+    c.close()
+    uploaded_tabnames = {r['TABNAME'] for r in slim}
+    return jsonify(ok=True, rows=total, tabnames=tab_count, merged=list(uploaded_tabnames))
 
 @app.post('/api/upload/dd04t')
 @login_required
 def up_dd04t():
     f = request.files.get('file')
     if not f: return jsonify(error='no_file'), 400
-    # Persist the upload to disk first so we can stream progress while parsing.
-    tmp_xlsx = os.path.join(DATA, 'reference', f'_dd04t_upload_{secrets.token_hex(4)}.xlsx')
+    tmp_xlsx = os.path.join(DATA, f'_dd04t_upload_{secrets.token_hex(4)}.xlsx')
     f.save(tmp_xlsx)
     original_name = f.filename
 
     def gen():
-        tmp_db = DD04T_DB + '.tmp'
+        c = None
         try:
-            if os.path.exists(tmp_db): os.remove(tmp_db)
-            c = sqlite3.connect(tmp_db)
-            c.execute('''CREATE TABLE dd04t (
-                rollname TEXT PRIMARY KEY,
-                SCRTEXT_M TEXT, SCRTEXT_L TEXT, SCRTEXT_S TEXT,
-                DDTEXT TEXT, REPTEXT TEXT)''')
-            c.execute('CREATE TABLE dd04t_meta (k TEXT PRIMARY KEY, v TEXT)')
-            c.execute('PRAGMA synchronous=OFF')
-            c.execute('PRAGMA journal_mode=MEMORY')
+            c = harness_db()
+            c.execute('PRAGMA synchronous=NORMAL')
+            c.execute('BEGIN EXCLUSIVE')
+            c.execute('DELETE FROM dd04t')
+            c.execute('DELETE FROM dd04t_meta')
             wb = load_workbook(tmp_xlsx, read_only=True, data_only=True)
             eng = {'EN', 'E', 'en', 'e'}
             seen = set(); n = 0; BATCH = 5000; batch = []
-            c.execute('BEGIN')
             yield json.dumps({'event': 'start'}) + '\n'
             for sn in wb.sheetnames:
                 ws = wb[sn]
@@ -301,11 +376,13 @@ def up_dd04t():
                       ('uploadedAt', datetime.utcnow().isoformat() + 'Z'))
             c.execute('INSERT OR REPLACE INTO dd04t_meta VALUES (?,?)', ('filename', original_name))
             c.execute('INSERT OR REPLACE INTO dd04t_meta VALUES (?,?)', ('rows', str(n)))
-            c.commit(); c.close()
-            os.replace(tmp_db, DD04T_DB)
+            c.commit(); c.close(); c = None
             _reenrich_all()
             yield json.dumps({'event': 'done', 'ok': True, 'rows': n}) + '\n'
         except Exception as e:
+            if c:
+                try: c.rollback(); c.close()
+                except Exception: pass
             yield json.dumps({'event': 'error', 'error': str(e)}) + '\n'
         finally:
             try: os.remove(tmp_xlsx)
@@ -315,8 +392,7 @@ def up_dd04t():
                     headers={'X-Accel-Buffering': 'no', 'Cache-Control': 'no-cache'})
 
 def _dd04t_info():
-    if not os.path.exists(DD04T_DB): return None
-    c = sqlite3.connect(DD04T_DB)
+    c = harness_db()
     try:
         m = dict(c.execute('SELECT k,v FROM dd04t_meta').fetchall())
     except sqlite3.OperationalError:
@@ -329,16 +405,15 @@ def _dd04t_info():
 
 def _dd04t_lookup(rollnames, textfield):
     """Return {rollname: text} for given set of rollnames."""
-    if not rollnames or not os.path.exists(DD04T_DB): return {}
+    if not rollnames: return {}
     if textfield not in ('SCRTEXT_M', 'SCRTEXT_L', 'SCRTEXT_S', 'DDTEXT', 'REPTEXT'):
         textfield = 'SCRTEXT_M'
-    c = sqlite3.connect(DD04T_DB)
+    c = harness_db()
     out = {}
     rollnames = list(rollnames)
-    # Chunk the IN clause to stay under SQLite's variable limit (999)
     for i in range(0, len(rollnames), 500):
         chunk = rollnames[i:i+500]
-        q = f'SELECT rollname,{textfield} FROM dd04t WHERE rollname IN ({",".join("?"*len(chunk))})'
+        q = f'SELECT rollname,"{textfield}" FROM dd04t WHERE rollname IN ({",".join("?"*len(chunk))})'
         for rn, txt in c.execute(q, chunk):
             if txt: out[rn] = txt
     c.close()
@@ -347,59 +422,67 @@ def _dd04t_lookup(rollnames, textfield):
 # ───────────── ENRICHMENT HELPERS ─────────────
 def _enrich_columns(table, columns, textfield='SCRTEXT_M'):
     """Return {fieldname: 'FIELDNAME - description'} for all resolvable columns."""
-    dd03l = _read_ref('dd03l.json') or {}
-    f2r = {}
-    for r in dd03l.get('rows', []):
-        if r.get('TABNAME') == table and r.get('FIELDNAME'):
-            f2r.setdefault(r['FIELDNAME'], r.get('ROLLNAME', ''))
-    needed_rolls = {v for v in f2r.values() if v}
+    c = harness_db()
+    rows = c.execute(
+        'SELECT "FIELDNAME", "ROLLNAME" FROM _dd03l WHERE "TABNAME"=?', (table,)
+    ).fetchall()
+    c.close()
+    f2r = {r[0]: r[1] for r in rows if r[0] and r[1]}
+    needed_rolls = set(f2r.values())
     txts = _dd04t_lookup(needed_rolls, textfield)
     enriched = {}
-    for c in columns:
-        roll = f2r.get(c, '')
+    for col in columns:
+        roll = f2r.get(col, '')
         txt = txts.get(roll, '') if roll else ''
         if txt:
-            enriched[c] = f'{c} - {txt}'
+            enriched[col] = f'{col} - {txt}'
     return enriched
 
 def _reenrich_all():
-    """Re-run enrichment for all stored transactional tables, updating resolved entries."""
-    tdir = os.path.join(DATA, 'transactional')
-    for fn in os.listdir(tdir):
-        if not fn.endswith('.json'): continue
-        p = os.path.join(tdir, fn)
+    """Re-run enrichment for all stored transactional tables."""
+    c = harness_db()
+    meta_rows = c.execute(
+        'SELECT tablename, columns, enriched_columns FROM _table_meta'
+    ).fetchall()
+    c.close()
+    for m in meta_rows:
+        table = m['tablename']
+        cols  = json.loads(m['columns'] or '[]')
+        if not table or not cols: continue
         try:
-            with open(p) as f:
-                d = json.load(f)
-            table = d.get('table', '')
-            cols = d.get('columns', [])
-            if not table or not cols: continue
             new_enriched = _enrich_columns(table, cols)
-            existing = dict(d.get('enriched_columns', {}))
-            existing.update(new_enriched)  # overwrite with fresh; keeps blanks not yet resolvable
-            d['enriched_columns'] = existing
-            with open(p, 'w') as f:
-                json.dump(d, f)
+            existing = json.loads(m['enriched_columns'] or '{}') or {}
+            existing.update(new_enriched)
+            c2 = harness_db()
+            c2.execute('UPDATE _table_meta SET enriched_columns=? WHERE tablename=?',
+                       (json.dumps(existing), table))
+            c2.commit(); c2.close()
         except Exception:
             pass
 
 # ───────────── DD08L ─────────────
 def _dd08l_info():
-    dd08l = _read_ref('dd08l.json')
-    if not dd08l: return None
-    rows = dd08l.get('rows', [])
-    if not rows: return None
-    return {'loaded': True, 'rows': len(rows),
-            'uploadedAt': dd08l.get('uploadedAt'), 'filename': dd08l.get('filename')}
+    c = harness_db()
+    try:
+        m = dict(c.execute('SELECT k,v FROM _dd08l_meta').fetchall())
+    except sqlite3.OperationalError:
+        c.close(); return None
+    c.close()
+    rows = int(m.get('rows', 0))
+    if rows == 0: return None
+    return {'loaded': True, 'rows': rows,
+            'uploadedAt': m.get('uploadedAt'), 'filename': m.get('filename')}
 
 def _dd08l_lookup(checktable):
     """Return the text-table TABNAME for a given check table (FRKART=TEXT), or None."""
-    dd08l = _read_ref('dd08l.json')
-    if not dd08l: return None
-    for r in dd08l.get('rows', []):
-        if r.get('CHECKTABLE') == checktable and r.get('FRKART') == 'TEXT':
-            return r.get('TABNAME', '').strip() or None
-    return None
+    c = harness_db()
+    row = c.execute(
+        'SELECT TABNAME FROM _dd08l WHERE CHECKTABLE=? AND FRKART=? LIMIT 1',
+        (checktable, 'TEXT')
+    ).fetchone()
+    c.close()
+    if not row: return None
+    return row[0].strip() or None
 
 @app.post('/api/upload/dd08l')
 @login_required
@@ -407,14 +490,27 @@ def up_dd08l():
     f = request.files.get('file')
     if not f: return jsonify(error='no_file'), 400
     rows, _ = _parse_wb(f)
-    clean_rows = [{k: (str(v).strip() if v is not None else '') for k, v in r.items()}
-                  for r in rows]
-    out = {'rows': clean_rows,
-           'uploadedAt': datetime.utcnow().isoformat() + 'Z',
-           'filename': f.filename}
-    with open(os.path.join(DATA, 'reference', 'dd08l.json'), 'w') as o:
-        json.dump(out, o)
-    return jsonify(ok=True, rows=len(clean_rows))
+    _DD08L_FIXED = {'CHECKTABLE', 'TABNAME', 'FRKART', 'FIELDNAME'}
+    batch = []
+    for r in rows:
+        clean = {k: (str(v).strip() if v is not None else '') for k, v in r.items()}
+        extra = {k: v for k, v in clean.items() if k not in _DD08L_FIXED}
+        batch.append((clean.get('CHECKTABLE', ''), clean.get('TABNAME', ''),
+                      clean.get('FRKART', ''), clean.get('FIELDNAME', ''),
+                      json.dumps(extra) if extra else None))
+    c = harness_db()
+    c.execute('BEGIN')
+    c.execute('DELETE FROM _dd08l')
+    c.execute('DELETE FROM _dd08l_meta')
+    c.executemany(
+        'INSERT INTO _dd08l (CHECKTABLE, TABNAME, FRKART, FIELDNAME, _extra) VALUES (?,?,?,?,?)',
+        batch)
+    c.execute('INSERT OR REPLACE INTO _dd08l_meta VALUES (?,?)',
+              ('uploadedAt', datetime.utcnow().isoformat() + 'Z'))
+    c.execute('INSERT OR REPLACE INTO _dd08l_meta VALUES (?,?)', ('filename', f.filename))
+    c.execute('INSERT OR REPLACE INTO _dd08l_meta VALUES (?,?)', ('rows', str(len(batch))))
+    c.commit(); c.close()
+    return jsonify(ok=True, rows=len(batch))
 
 FNAME_RE = re.compile(r'^([A-Z0-9]+)_([A-Z0-9]+)_(\d+)_(\d{8})\.xlsx?$', re.I)
 
@@ -444,10 +540,9 @@ def up_trans():
             continue
         if all(v is None or v == '' for v in r): continue
         rows.append({h: ('' if v is None else v) for h, v in zip(headers, r)})
-    # Column validation: DD03L must be loaded and must contain this table.
-    # Exception: if table == DD03L and every row has TABNAME=DD03L, skip the error
-    # and instead process the file as a DD03L reference update (same as /api/upload/dd03l).
-    dd03l = _read_ref('dd03l.json')
+
+    # Column validation
+    dd03l = _read_dd03l()
     if not dd03l:
         return jsonify(error='dd03l_required',
                        hint='DD03L is not loaded. Upload DD03L before uploading any table.'), 400
@@ -455,8 +550,7 @@ def up_trans():
                   if r.get('TABNAME') == table and r.get('FIELDNAME')}
     if not tbl_fields:
         is_dd03l_self = (
-            table == 'DD03L' and
-            bool(rows) and
+            table == 'DD03L' and bool(rows) and
             all(str(r.get('TABNAME', '')).strip().upper() == 'DD03L' for r in rows)
         )
         if not is_dd03l_self:
@@ -464,26 +558,45 @@ def up_trans():
                            hint=f'No entries found in DD03L for table {table}. '
                                 f'Upload the DD03L extract containing {table} first.'), 400
     else:
-        # ≥95% of non-empty column headers must match known field names for this table
+        threshold = 1.0 if table == 'DD03L' else 0.95
         non_empty_headers = [h for h in headers if h]
-        matched_headers = [h for h in non_empty_headers if h in tbl_fields]
-        unmatched_headers = [h for h in non_empty_headers if h not in tbl_fields]
-        if not non_empty_headers or len(matched_headers) / len(non_empty_headers) < 0.95:
+        matched_headers   = [h for h in non_empty_headers if h in tbl_fields]
+        unmatched_headers = [(headers.index(h) + 1, h) for h in non_empty_headers if h not in tbl_fields]
+        if not non_empty_headers or len(matched_headers) / len(non_empty_headers) < threshold:
+            sample = [f'col {col} "{name}"' for col, name in unmatched_headers[:10]]
             return jsonify(error='non_technical_columns', table=table,
                            matched=len(matched_headers), total=len(non_empty_headers),
-                           unmatched_sample=unmatched_headers[:10],
-                           hint=f'Column headers must be SAP technical field names. '
-                                f'Re-export from SE16N using technical column names.'), 400
+                           unmatched_sample=sample,
+                           hint='Column headers must be SAP technical field names. '
+                                'Re-export from SE16N using technical column names.'), 400
+
     enriched_columns = _enrich_columns(table, headers)
-    out = {'table': table, 'system': system, 'client': client, 'date': date,
-           'project': current_project,
-           'filename': f.filename,
-           'uploadedAt': datetime.utcnow().isoformat() + 'Z',
-           'columns': headers, 'rows': rows,
-           'enriched_columns': enriched_columns}
-    with open(os.path.join(DATA, 'transactional', f'{table}.json'), 'w') as o:
-        json.dump(out, o)
-    # If this was a self-describing DD03L file, also update the DD03L reference
+
+    # Dynamic table: DROP + CREATE + INSERT
+    non_empty = [h for h in headers if h]
+    col_defs  = ', '.join(f'"{h}" TEXT' for h in non_empty)
+    col_list  = ', '.join(f'"{h}"' for h in non_empty)
+    val_marks = ', '.join('?' * len(non_empty))
+
+    c = harness_db()
+    c.execute('BEGIN')
+    c.execute(f'DROP TABLE IF EXISTS "{table}"')
+    c.execute(f'CREATE TABLE "{table}" ({col_defs})')
+    if rows:
+        c.executemany(
+            f'INSERT INTO "{table}" ({col_list}) VALUES ({val_marks})',
+            [tuple(r.get(h, '') for h in non_empty) for r in rows]
+        )
+    c.execute('''
+        INSERT OR REPLACE INTO _table_meta
+            (tablename, system, client, date, project, filename, uploadedAt, columns, enriched_columns)
+        VALUES (?,?,?,?,?,?,?,?,?)
+    ''', (table, system, client, date, current_project, f.filename,
+          datetime.utcnow().isoformat() + 'Z',
+          json.dumps(headers), json.dumps(enriched_columns)))
+    c.commit(); c.close()
+
+    # Self-describing DD03L: also update _dd03l reference
     if table == 'DD03L' and not tbl_fields:
         norm = [{_DD03L_HEADER_MAP.get(k, k): v for k, v in r.items()} for r in rows]
         slim = []
@@ -492,18 +605,10 @@ def up_trans():
             fn = str(r.get('FIELDNAME', '')).strip()
             if not tn or not fn: continue
             slim.append({k: (str(v).strip() if v is not None else '') for k, v in r.items()})
-        uploaded_tabnames = {r['TABNAME'] for r in slim}
-        existing = _read_ref('dd03l.json')
-        if existing:
-            kept = [r for r in existing.get('rows', []) if r.get('TABNAME') not in uploaded_tabnames]
-            slim = kept + slim
-        tabnames = sorted({r['TABNAME'] for r in slim})
-        ref_out = {'rows': slim, 'tabnames': tabnames,
-                   'uploadedAt': datetime.utcnow().isoformat() + 'Z',
-                   'filename': f.filename}
-        with open(os.path.join(DATA, 'reference', 'dd03l.json'), 'w') as o:
-            json.dump(ref_out, o)
-        _reenrich_all()
+        if slim:
+            _write_dd03l(slim, f.filename)
+            _reenrich_all()
+
     return jsonify(ok=True, table=table, rows=len(rows), columns=len(headers),
                    system=system, client=client, date=date)
 
@@ -512,23 +617,34 @@ def up_trans():
 @login_required
 def get_data(table):
     table = table.upper()
-    p = os.path.join(DATA, 'transactional', f'{table}.json')
-    if not os.path.exists(p): return jsonify(error='not_found'), 404
-    with open(p) as f: d = json.load(f)
-    enriched = d.get('enriched_columns')
-    if enriched is None:
-        # Legacy tables (uploaded before auto-enrichment): compute on the fly
+    c = harness_db()
+    meta = c.execute(
+        'SELECT columns, enriched_columns, filename, uploadedAt, system, client, date '
+        'FROM _table_meta WHERE tablename=?', (table,)
+    ).fetchone()
+    if not meta:
+        c.close(); return jsonify(error='not_found'), 404
+    columns  = json.loads(meta['columns'] or '[]')
+    enriched = json.loads(meta['enriched_columns'] or '{}') or {}
+    if not enriched:
         textfield = request.args.get('textfield', 'SCRTEXT_M')
-        enriched = _enrich_columns(table, d.get('columns', []), textfield)
-    cols = [enriched.get(c, c) for c in d.get('columns', [])]
-    rows = [{enriched.get(c, c): r.get(c, '') for c in d.get('columns', [])}
-            for r in d.get('rows', [])]
-    matched = sum(1 for c in d.get('columns', []) if c in enriched)
+        enriched  = _enrich_columns(table, columns, textfield)
+    non_empty = [h for h in columns if h]
+    try:
+        col_sql  = ', '.join(f'"{h}"' for h in non_empty)
+        rows_raw = c.execute(f'SELECT {col_sql} FROM "{table}"').fetchall()
+    except sqlite3.OperationalError:
+        c.close(); return jsonify(error='not_found'), 404
+    c.close()
+    rows = [{enriched.get(col, col): (row[i] if row[i] is not None else '')
+             for i, col in enumerate(non_empty)}
+            for row in rows_raw]
+    cols    = [enriched.get(col, col) for col in columns]
+    matched = sum(1 for col in columns if col in enriched)
     return jsonify(table=table, columns=cols, rows=rows,
-                   matched=matched, total=len(d.get('columns', [])),
-                   filename=d.get('filename'), uploadedAt=d.get('uploadedAt'),
-                   system=d.get('system'), client=d.get('client'), date=d.get('date'))
-
+                   matched=matched, total=len(columns),
+                   filename=meta['filename'], uploadedAt=meta['uploadedAt'],
+                   system=meta['system'], client=meta['client'], date=meta['date'])
 
 @app.post('/api/data/<table>/describe')
 @login_required
@@ -536,93 +652,87 @@ def describe_column(table):
     table = table.upper()
     d_req = request.get_json(silent=True) or {}
     field = str(d_req.get('field', '')).strip().upper()
-    if not field:
-        return jsonify(error='no_field'), 400
+    if not field: return jsonify(error='no_field'), 400
 
-    p = os.path.join(DATA, 'transactional', f'{table}.json')
-    if not os.path.exists(p):
-        return jsonify(error='not_found'), 404
+    c = harness_db()
+    if not c.execute('SELECT 1 FROM _table_meta WHERE tablename=?', (table,)).fetchone():
+        c.close(); return jsonify(error='not_found'), 404
 
-    # Step 1: look up CHECKTABLE from DD03L
-    dd03l = _read_ref('dd03l.json') or {}
-    checktable = ''
-    for r in dd03l.get('rows', []):
-        if r.get('TABNAME') == table and r.get('FIELDNAME') == field:
-            checktable = str(r.get('CHECKTABLE', '')).strip()
-            break
+    # Step 1: CHECKTABLE from _dd03l
+    row = c.execute(
+        'SELECT "CHECKTABLE" FROM _dd03l WHERE "TABNAME"=? AND "FIELDNAME"=? LIMIT 1',
+        (table, field)
+    ).fetchone()
+    c.close()
+    checktable = str(row[0]).strip() if row and row[0] else ''
     if not checktable:
         return jsonify(error='no_checktable',
                        hint=f'No check table defined for {table}.{field} in DD03L'), 400
 
-    # Step 2: find text table from DD08L
+    # Step 2: text table from _dd08l
     text_table = _dd08l_lookup(checktable)
     if not text_table:
-        dd08l = _read_ref('dd08l.json')
-        if not dd08l:
+        c = harness_db()
+        has_dd08l = c.execute('SELECT 1 FROM _dd08l_meta WHERE k=?', ('uploadedAt',)).fetchone()
+        c.close()
+        if not has_dd08l:
             return jsonify(error='dd08l_missing',
                            hint='Upload DD08L to enable value description lookup'), 400
         return jsonify(error='no_text_table',
                        hint=f'No text table (FRKART=TEXT) found in DD08L for check table {checktable}'), 400
 
-    # Step 3: load text table rows (warn if not uploaded yet)
-    tt_path = os.path.join(DATA, 'transactional', f'{text_table}.json')
-    warning = None
-    values = {}
-    if not os.path.exists(tt_path):
+    # Step 3: load text table rows
+    warning = None; values = {}
+    c = harness_db()
+    tt_meta = c.execute('SELECT columns FROM _table_meta WHERE tablename=?', (text_table,)).fetchone()
+    if not tt_meta:
         warning = f'Upload {text_table} as a transactional table to get descriptions for {field}'
     else:
-        with open(tt_path) as f:
-            tt_data = json.load(f)
-        tt_cols = tt_data.get('columns', [])
+        tt_cols = json.loads(tt_meta['columns'] or '[]')
         has_spras = 'SPRAS' in tt_cols
-        for row in tt_data.get('rows', []):
-            if has_spras:
-                lang = str(row.get('SPRAS', '')).strip().upper()
-                if lang not in ('EN', 'E'):
-                    continue
-            val = str(row.get(field, '')).strip()
-            vtext = str(row.get('VTEXT', '')).strip()
-            if val and vtext:
-                values[val] = vtext
-
-    return jsonify(field=field,
-                   description_column=f'{field} - Description',
-                   checktable=checktable,
-                   text_table=text_table,
-                   values=values,
-                   warning=warning)
+        try:
+            tt_rows = c.execute(f'SELECT * FROM "{text_table}"').fetchall()
+            for row in tt_rows:
+                row_dict = dict(zip(tt_cols, row))
+                if has_spras:
+                    lang = str(row_dict.get('SPRAS', '')).strip().upper()
+                    if lang not in ('EN', 'E'): continue
+                val   = str(row_dict.get(field, '')).strip()
+                vtext = str(row_dict.get('VTEXT', '')).strip()
+                if val and vtext:
+                    values[val] = vtext
+        except sqlite3.OperationalError:
+            warning = f'Upload {text_table} as a transactional table to get descriptions for {field}'
+    c.close()
+    return jsonify(field=field, description_column=f'{field} - Description',
+                   checktable=checktable, text_table=text_table,
+                   values=values, warning=warning)
 
 @app.delete('/api/data/<table>')
 @login_required
 def del_data(table):
     table = table.upper()
-    p = os.path.join(DATA, 'transactional', f'{table}.json')
-    if os.path.exists(p): os.remove(p)
+    c = harness_db()
+    c.execute('BEGIN')
+    c.execute(f'DROP TABLE IF EXISTS "{table}"')
+    c.execute('DELETE FROM _table_meta WHERE tablename=?', (table,))
+    c.commit(); c.close()
     return jsonify(ok=True)
 
-# ───────────── STATIC ─────────────
+# ───────────── ADMIN ─────────────
 @app.post('/api/admin/migrate-legacy')
 @login_required
 def migrate_legacy():
     d = request.get_json(silent=True) or {}
     project = (d.get('project') or '').strip()
-    if not project:
-        return jsonify(error='missing_project'), 400
-    tdir = os.path.join(DATA, 'transactional')
-    updated = 0
-    for fn in os.listdir(tdir):
-        if not fn.endswith('.json'): continue
-        p = os.path.join(tdir, fn)
-        try:
-            with open(p) as f: data = json.load(f)
-            if 'project' not in data:
-                data['project'] = project
-                with open(p, 'w') as f: json.dump(data, f)
-                updated += 1
-        except Exception:
-            pass
-    return jsonify(ok=True, updated=updated)
+    if not project: return jsonify(error='missing_project'), 400
+    c = harness_db()
+    result = c.execute(
+        'UPDATE _table_meta SET project=? WHERE project IS NULL OR project=""', (project,))
+    c.commit(); c.close()
+    return jsonify(ok=True, updated=result.rowcount)
 
+# ───────────── STATIC ─────────────
 @app.get('/')
 def root():
     if not NO_AUTH and 'uid' not in session:
