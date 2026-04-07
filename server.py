@@ -146,11 +146,15 @@ def _validate_dd_headers(table_name, headers, table_type, dd03l_db_name, check_v
         ).fetchall()
         fieldname_vals = {r[0].strip() for r in rows if r[0] is not None}
 
-        headers_set = set(headers)
-        not_in_dd03l = sorted(headers_set - fieldname_vals)
-        if not_in_dd03l:
-            sample = ', '.join(not_in_dd03l[:5]) + (' …' if len(not_in_dd03l) > 5 else '')
-            return f'[V9]{t} First upload DD03L file with {table_name} entries. Missing Fields: {sample}'
+        headers_set = set(headers) - {'MANDT'}
+        fieldname_vals -= {'MANDT'}
+        extra   = sorted(headers_set - fieldname_vals)
+        missing = sorted(fieldname_vals - headers_set)
+        if extra or missing:
+            parts = []
+            if extra:   parts.append(f'extra in Excel: {", ".join(extra[:5])}{"  …" if len(extra) > 5 else ""}')
+            if missing: parts.append(f'missing from Excel: {", ".join(missing[:5])}{"  …" if len(missing) > 5 else ""}')
+            return f'[V9]{t} {table_name}: Excel headers do not match DD03L field definitions. {"; ".join(parts)}'
 
     return None
 
@@ -160,7 +164,7 @@ def _validate_configuration(table_name, headers, data_rows, table_type, dd03l_db
 
 
 def _validate_customizing(table_name, headers, data_rows, table_type, dd03l_db_name):
-    return _validate_dd_headers(table_name, headers, table_type, dd03l_db_name, check_v8=False)
+    return _validate_dd_headers(table_name, headers, table_type, dd03l_db_name, check_v8=True)
 
 
 # ── Database helpers ───────────────────────────────────────────────────────
@@ -236,7 +240,22 @@ def init_db():
 
 
 def _hash(password: str) -> str:
-    return hashlib.sha256(password.encode()).hexdigest()
+    """Hash a password with PBKDF2-SHA256 + random salt."""
+    salt = secrets.token_hex(16)
+    h = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), 260000)
+    return f'pbkdf2:260000:{salt}:{h.hex()}'
+
+
+def _verify_password(password: str, stored: str) -> bool:
+    """Verify password. Supports legacy plain SHA-256 (no colon) and PBKDF2."""
+    if ':' not in stored:
+        return stored == hashlib.sha256(password.encode()).hexdigest()
+    try:
+        _, iterations, salt, hash_hex = stored.split(':')
+        h = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), int(iterations))
+        return h.hex() == hash_hex
+    except Exception:
+        return False
 
 
 def _get_token():
@@ -284,11 +303,17 @@ def login():
 
     with get_db() as conn:
         user = conn.execute(
-            'SELECT * FROM users WHERE username = ? AND password_hash = ?',
-            (username, _hash(password))
+            'SELECT * FROM users WHERE username = ?', (username,)
         ).fetchone()
-        if not user:
+        if not user or not _verify_password(password, user['password_hash']):
             return jsonify({'error': 'Invalid credentials'}), 400
+
+        # Upgrade legacy SHA-256 hash to PBKDF2 on successful login
+        if ':' not in user['password_hash']:
+            conn.execute(
+                'UPDATE users SET password_hash = ? WHERE id = ?',
+                (_hash(password), user['id'])
+            )
 
         token = secrets.token_hex(32)
         conn.execute('INSERT INTO sessions (token, user_id) VALUES (?, ?)', (token, user['id']))
@@ -404,7 +429,7 @@ def drop_table(table):
         ).fetchone()
         if not exists:
             return jsonify({'error': 'Table not found'}), 404
-        conn.execute(f'DELETE FROM "{table}"')
+        conn.execute(f'DROP TABLE IF EXISTS "{table}"')
         conn.execute('DELETE FROM _table_meta WHERE table_name = ?', (table,))
     return jsonify({'ok': True})
 

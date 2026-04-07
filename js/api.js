@@ -2,6 +2,7 @@
 // Attaches auth token and normalizes errors into thrown Error objects.
 
 import { toast } from './components/modal.js';
+import { setState } from './state.js';
 
 const BASE = '';
 
@@ -10,6 +11,8 @@ function _handleUnauthorized() {
   localStorage.removeItem('custname');
   localStorage.removeItem('custname_label');
   localStorage.removeItem('user');
+  setState('user', null);
+  setState('customer', null);
   toast('Session expired. Please log in again.', 'err');
   document.getElementById('modal-ok').addEventListener('click', () => {
     location.hash = '#/login';

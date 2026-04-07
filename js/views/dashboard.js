@@ -195,6 +195,7 @@ function _fillTbody(tbody, tables, emptyMsg, container) {
 }
 
 async function _deleteTable(container, table) {
+  if (!confirm(`Delete table "${table}"? This cannot be undone.`)) return;
   try {
     await api.delete(`/api/tables/${encodeURIComponent(table)}`);
     await _loadTablesMeta(container);

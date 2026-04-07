@@ -15,11 +15,18 @@ export function isAuthenticated() {
 }
 
 export function restoreSession() {
-  const userStr  = localStorage.getItem('user');
-  const custname = localStorage.getItem('custname');
-  const custLabel = localStorage.getItem('custname_label');
-  if (userStr)  setState('user', JSON.parse(userStr));
-  if (custname) setState('customer', { custname, name: custLabel || custname });
+  try {
+    const userStr   = localStorage.getItem('user');
+    const custname  = localStorage.getItem('custname');
+    const custLabel = localStorage.getItem('custname_label');
+    if (userStr)  setState('user', JSON.parse(userStr));
+    if (custname) setState('customer', { custname, name: custLabel || custname });
+  } catch {
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    localStorage.removeItem('custname');
+    localStorage.removeItem('custname_label');
+  }
 }
 
 export async function login(username, password) {
