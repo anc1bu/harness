@@ -5,9 +5,13 @@ import { logout } from '../auth.js';
 import { navigate } from '../router.js';
 import { toast } from '../components/modal.js';
 
-const SECTIONS = ['Tables', 'Users'];
+const ALL_SECTIONS   = ['Tables', 'Users'];
+const ADMIN_SECTIONS = new Set(['Users']);
 
 export function mount(container) {
+  const user = JSON.parse(localStorage.getItem('user') || 'null');
+  const SECTIONS = ALL_SECTIONS.filter(s => !ADMIN_SECTIONS.has(s) || user?.is_admin);
+
   container.innerHTML = `
     <div id="topbar">
       <div class="logo">HARNESS <span>//</span> SAPCONS</div>

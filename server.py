@@ -10,6 +10,7 @@ import re
 import secrets
 import hashlib
 import sqlite3
+from contextlib import contextmanager
 from functools import wraps
 from io import BytesIO
 from flask import Flask, request, jsonify, send_from_directory
@@ -24,7 +25,7 @@ _SYSTEM_TABLES = ('users', 'sessions', '_table_meta', 'customers', 'user_custome
 
 # ── Table type classification ──────────────────────────────────────────────
 
-def _determine_table_type(name, headers, data_rows):
+def _determine_table_type(name):
     upper = name.upper()
     if upper == 'DD03L':
         return 'master'
@@ -163,17 +164,21 @@ def _validate_configuration(table_name, headers, data_rows, table_type, dd03l_db
     return _validate_dd_headers(table_name, headers, table_type, dd03l_db_name, check_v8=True)
 
 
-def _validate_customizing(table_name, headers, data_rows, table_type, dd03l_db_name):
-    return _validate_dd_headers(table_name, headers, table_type, dd03l_db_name, check_v8=True)
-
-
 # ── Database helpers ───────────────────────────────────────────────────────
 
+@contextmanager
 def get_db():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys = ON')
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_db():
@@ -424,11 +429,6 @@ def drop_table(table):
         ).fetchone()
         if not meta:
             return jsonify({'error': 'Table not found'}), 404
-        exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?", (table,)
-        ).fetchone()
-        if not exists:
-            return jsonify({'error': 'Table not found'}), 404
         conn.execute(f'DROP TABLE IF EXISTS "{table}"')
         conn.execute('DELETE FROM _table_meta WHERE table_name = ?', (table,))
     return jsonify({'ok': True})
@@ -483,7 +483,7 @@ def upload_excel():
     data_rows = list(rows_iter)
 
     # ── Step 1: Determine table type ──────────────────────────────────────────
-    table_type = _determine_table_type(table_name, headers, data_rows)
+    table_type = _determine_table_type(table_name)
 
     # ── Step 2: V1 — technical headers check (all table types) ───────────────
     err = _validate_headers_technical(headers, table_name, table_type)
@@ -493,10 +493,8 @@ def upload_excel():
     # ── Step 3: Run type-specific validations ─────────────────────────────────
     if table_type == 'master':
         err = _validate_master(table_name, headers, data_rows, table_type, dd03l_db_name)
-    elif table_type == 'configuration':
-        err = _validate_configuration(table_name, headers, data_rows, table_type, dd03l_db_name)
     else:
-        err = _validate_customizing(table_name, headers, data_rows, table_type, dd03l_db_name)
+        err = _validate_configuration(table_name, headers, data_rows, table_type, dd03l_db_name)
     if err:
         return jsonify({'error': err}), 422
 
@@ -540,17 +538,15 @@ def upload_excel():
             'VALUES (?, ?, ?, ?, ?, ?)',
             (db_table_name, custname, table_name, system, client, date)
         )
-        rows_inserted = 0
-        for row in data_rows:
-            values = [
-                str(row[i]) if i < len(row) and row[i] is not None else None
-                for i in range(len(headers))
-            ]
-            conn.execute(
-                f'INSERT OR REPLACE INTO "{db_table_name}" ({col_names}) VALUES ({placeholders})',
-                values
-            )
-            rows_inserted += 1
+        all_values = [
+            [str(row[i]) if i < len(row) and row[i] is not None else None for i in range(len(headers))]
+            for row in data_rows
+        ]
+        conn.executemany(
+            f'INSERT OR REPLACE INTO "{db_table_name}" ({col_names}) VALUES ({placeholders})',
+            all_values
+        )
+        rows_inserted = len(all_values)
 
     return jsonify({
         'ok': True,
