@@ -95,15 +95,6 @@ select:focus, input:focus { border-color: var(--accent); }
 .btn:disabled:hover { background: transparent; box-shadow: none; }
 .btn.inline { display: inline-block; width: auto; padding: 6px 14px; }
 
-/* ── Stat grid ── */
-.stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 14px; }
-.stat-box {
-  background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
-  padding: 8px 6px; text-align: center;
-}
-.stat-box .sv { font-size: 18px; color: var(--accent); font-weight: bold; }
-.stat-box .sl { font-size: 9px; letter-spacing: 1px; color: var(--text-dim); text-transform: uppercase; margin-top: 2px; }
-
 /* ── Column list ── */
 .col-list {
   max-height: 260px; overflow-y: auto; border: 1px solid var(--border);
@@ -141,16 +132,6 @@ tbody tr { border-bottom: 1px solid rgba(31,58,90,0.5); }
 tbody tr:hover { background: rgba(74,222,128,0.05); }
 tbody td { padding: 5px 10px; color: var(--text); white-space: nowrap; }
 tbody tr.selected td { background: rgba(74,222,128,0.10); color: var(--accent2); }
-
-/* ── Tooltip ── */
-#tooltip {
-  position: fixed; background: var(--panel); border: 1px solid var(--accent);
-  border-radius: 4px; padding: 10px 14px; font-size: 11px; pointer-events: none;
-  display: none; z-index: 999; max-width: 260px; box-shadow: var(--glow);
-}
-#tooltip .tt-title { color: var(--accent2); font-weight: bold; margin-bottom: 6px; }
-#tooltip .tt-row { color: var(--text-dim); margin-bottom: 2px; }
-#tooltip .tt-row span { color: var(--text); }
 
 /* ── Modal ── */
 #modal-overlay {

@@ -43,10 +43,16 @@ def _determine_table_type(name, headers, data_rows):
 
 # ── Validations ────────────────────────────────────────────────────────────
 
-def _validate_general(filename):
-    """Filename format check — applies to all uploads."""
-    if not _UPLOAD_RE.match(filename):
-        return f'Invalid filename "{filename}". Expected: {{TABLENAME}}_{{SYSTEM}}_{{CLIENT}}_{{DATE}}.xlsx'
+def _validate_headers_technical(headers, table_name, table_type):
+    """V1 — all headers must be technical names (no spaces). Applies to all table types."""
+    t = f'[{table_type}]'
+    descriptive = [h for h in headers if ' ' in h]
+    if descriptive:
+        sample = ', '.join(f'"{h}"' for h in descriptive[:5])
+        return (
+            f'[V1]{t} {table_name}: column headers must be technical field names, not descriptions. '
+            f'Descriptive headers found: {sample}'
+        )
     return None
 
 
@@ -54,14 +60,14 @@ def _validate_master(table_name, headers, data_rows, table_type):
     """Validations for master tables (e.g. DD03L)."""
     t = f'[{table_type}]'
 
-    # V1: TABNAME and FIELDNAME columns must exist
+    # V2: TABNAME and FIELDNAME columns must exist
     missing_cols = [c for c in ('TABNAME', 'FIELDNAME') if c not in headers]
     if missing_cols:
-        return f'[V1]{t} {table_name}: missing required columns: {", ".join(missing_cols)}'
+        return f'[V2]{t} {table_name}: missing required columns: {", ".join(missing_cols)}'
 
     tabname_idx = headers.index('TABNAME')
 
-    # V2: if DD03L appears in TABNAME, no other TABNAME values are allowed
+    # V3: if DD03L appears in TABNAME, no other TABNAME values are allowed
     all_tabnames = {
         str(r[tabname_idx]).strip().upper()
         for r in data_rows
@@ -71,11 +77,11 @@ def _validate_master(table_name, headers, data_rows, table_type):
         others = sorted(all_tabnames - {'DD03L'})
         sample = ', '.join(others[:5]) + (' …' if len(others) > 5 else '')
         return (
-            f'[V2]{t} {table_name}: DD03L cannot be mixed with other table names in the TABNAME column. '
+            f'[V3]{t} {table_name}: DD03L cannot be mixed with other table names in the TABNAME column. '
             f'Please upload a file that contains only DD03L entries. Found other values: {sample}'
         )
 
-    # V3: only if all TABNAME values equal DD03L — Excel columns must match FIELDNAME values
+    # V4: only if all TABNAME values equal DD03L — Excel columns must match FIELDNAME values
     if all_tabnames == {'DD03L'}:
         fieldname_idx = headers.index('FIELDNAME')
         rollname_idx  = headers.index('ROLLNAME') if 'ROLLNAME' in headers else None
@@ -92,9 +98,9 @@ def _validate_master(table_name, headers, data_rows, table_type):
             parts = []
             if extra:   parts.append(f'extra columns: {", ".join(extra)}')
             if missing: parts.append(f'missing columns: {", ".join(missing)}')
-            return f'[V3]{t} {table_name}: the uploaded file columns do not match the expected field definitions. {"; ".join(parts)}'
+            return f'[V4]{t} {table_name}: the uploaded file columns do not match the expected field definitions. {"; ".join(parts)}'
 
-    # V4: only if TABNAME values are not DD03L — Excel columns must match DD03L field definitions
+    # V5: only if TABNAME values are not DD03L — Excel columns must match DD03L field definitions
     if 'DD03L' not in all_tabnames:
         with get_db() as conn:
             rows = conn.execute(
@@ -109,89 +115,64 @@ def _validate_master(table_name, headers, data_rows, table_type):
                 parts = []
                 if extra:   parts.append(f'extra columns: {", ".join(extra)}')
                 if missing: parts.append(f'missing columns: {", ".join(missing)}')
-                return f'[V4]{t} {table_name}: columns do not match DD03L field definitions. {"; ".join(parts)}'
+                return f'[V5]{t} {table_name}: columns do not match DD03L field definitions. {"; ".join(parts)}'
+
+    return None
+
+
+def _validate_dd_headers(table_name, headers, table_type, check_v8=True):
+    """Shared DD03L prerequisite + header match check (V6, V7, V8, V9)."""
+    t = f'[{table_type}]'
+    with get_db() as conn:
+        dd03l_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='DD03L'"
+        ).fetchone()
+        dd03l_count = conn.execute("SELECT COUNT(*) FROM DD03L").fetchone()[0] if dd03l_exists else 0
+        if not dd03l_exists or dd03l_count == 0:
+            return f'[V6]{t} DD03L master table is not loaded. Upload DD03L before uploading {table_type} tables.'
+
+        master_count = conn.execute(
+            "SELECT COUNT(*) FROM DD03L WHERE TABNAME = 'DD03L'"
+        ).fetchone()[0]
+        if master_count < 30:
+            return (
+                f'[V7]{t} DD03L master data is incomplete ({master_count} rows where TABNAME="DD03L", '
+                f'need at least 30). Upload a complete DD03L file first.'
+            )
+
+        if check_v8:
+            exists_in_dd03l = conn.execute(
+                "SELECT 1 FROM DD03L WHERE TABNAME = ?", (table_name.upper(),)
+            ).fetchone()
+            if not exists_in_dd03l:
+                return f'[V8]{t} no entries in master table (DD03L) for {table_name}.'
+
+        rows = conn.execute(
+            "SELECT FIELDNAME FROM DD03L WHERE TABNAME = ? AND ROLLNAME IS NOT NULL AND ROLLNAME != ''",
+            (table_name.upper(),)
+        ).fetchall()
+        fieldname_vals = {r[0].strip() for r in rows if r[0] is not None}
+
+        headers_set = set(headers)
+        if headers_set != fieldname_vals:
+            extra   = sorted(headers_set - fieldname_vals)
+            missing = sorted(fieldname_vals - headers_set)
+            parts = []
+            if extra:   parts.append(f'extra columns: {", ".join(extra)}')
+            if missing: parts.append(f'missing columns: {", ".join(missing)}')
+            return f'[V9]{t} First upload DD03L file with {table_name} entries.'
 
     return None
 
 
 def _validate_configuration(table_name, headers, data_rows, table_type):
     """Validations for configuration tables (DD*)."""
-    t = f'[{table_type}]'
-    with get_db() as conn:
-        dd03l_exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='DD03L'"
-        ).fetchone()
-        dd03l_count = conn.execute("SELECT COUNT(*) FROM DD03L").fetchone()[0] if dd03l_exists else 0
-        if not dd03l_exists or dd03l_count == 0:
-            return f'[V5]{t} DD03L master table is not loaded. Upload DD03L before uploading configuration tables.'
-
-        master_count = conn.execute(
-            "SELECT COUNT(*) FROM DD03L WHERE TABNAME = 'DD03L'"
-        ).fetchone()[0]
-        if master_count < 30:
-            return (
-                f'[V6]{t} DD03L master data is incomplete ({master_count} rows where TABNAME="DD03L", '
-                f'need at least 30). Upload a complete DD03L file first.'
-            )
-
-        # V7: query FIELDNAME entries for this table (ROLLNAME not empty)
-        rows = conn.execute(
-            "SELECT FIELDNAME FROM DD03L WHERE TABNAME = ? AND ROLLNAME IS NOT NULL AND ROLLNAME != ''",
-            (table_name.upper(),)
-        ).fetchall()
-        fieldname_vals = {r[0].strip() for r in rows if r[0] is not None}
-
-        if not fieldname_vals:
-            return f'[V7]{t} no entries in master table (DD03L) for {table_name}.'
-
-        headers_set = set(headers)
-        if headers_set != fieldname_vals:
-            extra   = sorted(headers_set - fieldname_vals)
-            missing = sorted(fieldname_vals - headers_set)
-            parts = []
-            if extra:   parts.append(f'extra columns: {", ".join(extra)}')
-            if missing: parts.append(f'missing columns: {", ".join(missing)}')
-            return f'[V8]{t} First upload DD03L file with DD03L entries.'
-
-    return None
+    return _validate_dd_headers(table_name, headers, table_type, check_v8=True)
 
 
 def _validate_customizing(table_name, headers, data_rows, table_type):
-    """Validations for customizing tables — V4, V5, V7 (no V6)."""
-    t = f'[{table_type}]'
-    with get_db() as conn:
-        dd03l_exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='DD03L'"
-        ).fetchone()
-        dd03l_count = conn.execute("SELECT COUNT(*) FROM DD03L").fetchone()[0] if dd03l_exists else 0
-        if not dd03l_exists or dd03l_count == 0:
-            return f'[V5]{t} DD03L master table is not loaded. Upload DD03L before uploading customizing tables.'
-
-        master_count = conn.execute(
-            "SELECT COUNT(*) FROM DD03L WHERE TABNAME = 'DD03L'"
-        ).fetchone()[0]
-        if master_count < 30:
-            return (
-                f'[V6]{t} DD03L master data is incomplete ({master_count} rows where TABNAME="DD03L", '
-                f'need at least 30). Upload a complete DD03L file first.'
-            )
-
-        rows = conn.execute(
-            "SELECT FIELDNAME FROM DD03L WHERE TABNAME = ? AND ROLLNAME IS NOT NULL AND ROLLNAME != ''",
-            (table_name.upper(),)
-        ).fetchall()
-        fieldname_vals = {r[0].strip() for r in rows if r[0] is not None}
-
-        headers_set = set(headers)
-        if headers_set != fieldname_vals:
-            extra   = sorted(headers_set - fieldname_vals)
-            missing = sorted(fieldname_vals - headers_set)
-            parts = []
-            if extra:   parts.append(f'extra columns: {", ".join(extra)}')
-            if missing: parts.append(f'missing columns: {", ".join(missing)}')
-            return f'[V8]{t} First upload DD03L file with DD03L entries.'
-
-    return None
+    """Validations for customizing tables."""
+    return _validate_dd_headers(table_name, headers, table_type, check_v8=False)
 
 
 # ── Database helpers ───────────────────────────────────────────────────────
@@ -318,25 +299,6 @@ def list_tables_info():
     return jsonify(result)
 
 
-@app.get('/api/tables/<table>/data')
-@require_auth
-def get_table_data(table):
-    with get_db() as conn:
-        # Validate table exists and is not a system table
-        exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?"
-            " AND name NOT IN ('users','sessions','_table_meta')", (table,)
-        ).fetchone()
-        if not exists:
-            return jsonify({'error': 'Table not found'}), 404
-
-        cur = conn.execute(f'SELECT * FROM "{table}" LIMIT 5000')
-        columns = [d[0] for d in cur.description]
-        rows = [dict(r) for r in cur.fetchall()]
-
-    return jsonify({'columns': columns, 'rows': rows})
-
-
 @app.delete('/api/tables/<table>')
 @require_auth
 def drop_table(table):
@@ -396,7 +358,12 @@ def upload_excel():
     # ── Step 1: Determine table type ──────────────────────────────────────────
     table_type = _determine_table_type(table_name, headers, data_rows)
 
-    # ── Step 2: Run type-specific validations ─────────────────────────────────
+    # ── Step 2: V1 — technical headers check (all table types) ───────────────
+    err = _validate_headers_technical(headers, table_name, table_type)
+    if err:
+        return jsonify({'error': err}), 422
+
+    # ── Step 3: Run type-specific validations ─────────────────────────────────
     if table_type == 'master':
         err = _validate_master(table_name, headers, data_rows, table_type)
     elif table_type == 'configuration':
@@ -406,7 +373,7 @@ def upload_excel():
     if err:
         return jsonify({'error': err}), 422
 
-    # ── Step 3: Determine key fields ──────────────────────────────────────────
+    # ── Step 4: Determine key fields ──────────────────────────────────────────
     key_fields = set()
     if table_type == 'master':
         keyflag_idx   = headers.index('KEYFLAG')   if 'KEYFLAG'   in headers else None
@@ -424,7 +391,7 @@ def upload_excel():
             ).fetchall()
             key_fields = {r[0].strip() for r in rows if r[0] is not None}
 
-    # ── Create table if needed, then insert ───────────────────────────────────
+    # ── Step 5: Create table if needed, then insert ───────────────────────────
     def _col_def(h):
         return f'"{h}" TEXT PRIMARY KEY' if len(key_fields) == 1 and h in key_fields else f'"{h}" TEXT'
 
@@ -502,5 +469,4 @@ def serve_spa(path):
 
 if __name__ == '__main__':
     init_db()
-    print('Default credentials: admin / admin')
     app.run(debug=True, port=5000)

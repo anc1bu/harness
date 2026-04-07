@@ -5,8 +5,6 @@ const _state = {
   user: null,
   rows: [],
   columns: [],
-  currentTable: null,
-  simulation: null,
 };
 
 const _subscribers = {};

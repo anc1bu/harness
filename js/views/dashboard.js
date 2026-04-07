@@ -122,10 +122,6 @@ function _html() {
         </div>
       </div>
     </div>
-    <div id="tooltip">
-      <div class="tt-title" id="tt-title"></div>
-      <div id="tt-body"></div>
-    </div>
   `;
 }
 
@@ -241,8 +237,7 @@ async function _handleFile(file, container, statusEl) {
     const result = await api.upload('/api/upload', formData);
     statusEl.textContent = `✓ Inserted ${result.rows_inserted} rows into "${result.table}"`;
     statusEl.className = 'upload-status ok';
-    const _clearStatus = () => { statusEl.textContent = ''; statusEl.className = 'upload-status'; document.removeEventListener('click', _clearStatus); };
-    document.addEventListener('click', _clearStatus);
+    document.addEventListener('click', () => { statusEl.textContent = ''; statusEl.className = 'upload-status'; }, { once: true });
     await _loadTablesMeta(container);
   } catch (err) {
     statusEl.textContent = '';
