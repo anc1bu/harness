@@ -1,11 +1,5 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Working Guidelines
-
-Before starting any task, state how you'll verify the work. After completing it, verify it.
-
 ## Architecture
 
 **Stack**: Python Flask backend + Vanilla JS frontend. No build step, no JS framework, no ORM.
@@ -42,21 +36,16 @@ harness-dev/
 - **API**: All `fetch()` calls go through `api.js`. It attaches the auth token and normalizes errors.
 - **Routing**: Hash-based (`#/login`, `#/dashboard`, `#/settings`). Unauthenticated requests redirect to `#/login`.
 
-### Design System
-
-CSS variables defined in `theme.css` (dark terminal aesthetic):
-- `--bg`, `--panel`, `--border` — surface colors
-- `--accent` (#4ade80), `--accent2` (#86efac) — primary green palette
-- `--warn` (#e0b050), `--danger` (#e06060) — status colors
-- `--text`, `--text-dim` — typography
-
 ### Backend (server.py)
 
 Flask + `sqlite3`. All API routes require a Bearer token (session stored in `sessions` table). Routes:
 - `POST /api/auth/login` / `POST /api/auth/logout`
-- `GET /api/tables`, `GET /api/tables/<table>/data`, `DELETE /api/tables/<table>`
+- `GET /api/tables`, `GET /api/tables/info`, `GET /api/tables/<table>/data`, `DELETE /api/tables/<table>`
+- `POST /api/upload` — multipart Excel upload; filename must match `{TABLE}_{SYSTEM}_{CLIENT}_{DATE}.xlsx`
 - `GET /api/users`, `POST /api/users`
 - Everything else → `index.html` (SPA fallback)
+
+System tables (`users`, `sessions`, `_table_meta`) are excluded from all user-table queries. `_table_meta` stores upload metadata (system, client, date) keyed by table name.
 
 ### Running
 

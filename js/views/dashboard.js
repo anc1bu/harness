@@ -3,16 +3,29 @@
 import { api } from '../api.js';
 import { logout } from '../auth.js';
 import { navigate } from '../router.js';
-import { getState, setState, subscribe, unsubscribe } from '../state.js';
+import { getState, subscribe, unsubscribe } from '../state.js';
 import { toast } from '../components/modal.js';
 import { renderTable } from '../components/table.js';
-import { mountGraph, highlightNode } from '../components/graph.js';
+
+// ── General validation ─────────────────────────────────────────────────────
+const _FILENAME_RE = /^([A-Za-z0-9]+)_([A-Za-z0-9]+)_([A-Za-z0-9]+)_(\d+)\.xlsx$/i;
+
+// ── Table type classification ──────────────────────────────────────────────
+const _MASTER_TABLES = new Set(['DD03L']);
+
+function _classifyTable(name) {
+  const upper = name.toUpperCase();
+  if (_MASTER_TABLES.has(upper)) return 'master';
+  if (upper.startsWith('DD')) return 'configuration';
+  return 'customizing';
+}
 
 export function mount(container) {
   container.innerHTML = _html();
 
   _startClock(container);
-  _loadTables(container);
+  _loadTablesMeta(container);
+  _initUpload(container);
 
   container.querySelector('#btn-logout').addEventListener('click', async () => {
     await logout();
@@ -20,10 +33,9 @@ export function mount(container) {
   });
   container.querySelector('#btn-settings').addEventListener('click', () => navigate('#/settings'));
 
-  const onRowsChange = (rows) => _refreshTable(container, rows);
+  const onRowsChange = (rows) => _refreshDataTable(container, rows);
   subscribe('rows', onRowsChange);
 
-  // Cleanup subscriptions when view unmounts (router clears innerHTML)
   const observer = new MutationObserver(() => {
     if (!document.contains(container.querySelector('#panel-graph'))) {
       unsubscribe('rows', onRowsChange);
@@ -33,7 +45,30 @@ export function mount(container) {
   observer.observe(container, { childList: true });
 }
 
-// ── Private helpers ────────────────────────────────────────────────────────
+// ── HTML ───────────────────────────────────────────────────────────────────
+
+function _tableSection(id, label, tbodyId) {
+  return `
+    <div id="${id}">
+      <div class="ctrl-label" style="padding:10px 12px 6px;">${label}</div>
+      <table class="meta-table">
+        <thead>
+          <tr>
+            <th>Table Name</th>
+            <th>System</th>
+            <th>Client</th>
+            <th>Date</th>
+            <th>Entry Count</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody id="${tbodyId}">
+          <tr><td colspan="6" class="meta-empty">No tables uploaded</td></tr>
+        </tbody>
+      </table>
+    </div>
+  `;
+}
 
 function _html() {
   return `
@@ -50,22 +85,18 @@ function _html() {
     <div id="layout">
       <div class="panel" id="panel-control">
         <div class="panel-header"><div class="ph-dot"></div>CONTROL PANEL</div>
-        <div class="panel-body">
-          <div class="ctrl-section">
-            <div class="ctrl-label">Table</div>
-            <select id="table-select"><option value="">— select —</option></select>
+        <div class="panel-body" style="padding:0;display:flex;flex-direction:column;gap:0;">
+
+          <div class="drop-zone" id="drop-zone">
+            <div class="dz-icon">⬆</div>
+            <div class="dz-text">drag &amp; drop or <a class="dz-upload-link" id="upload-link">upload</a> .xlsx here</div>
+            <input type="file" id="upload-input" accept=".xlsx" style="display:none" />
           </div>
-          <button class="btn primary" id="btn-load">Load Table</button>
-          <div class="ctrl-section" id="stats-section" style="display:none">
-            <div class="stat-grid">
-              <div class="stat-box"><div class="sv" id="stat-rows">0</div><div class="sl">Rows</div></div>
-              <div class="stat-box"><div class="sv" id="stat-cols">0</div><div class="sl">Columns</div></div>
-            </div>
-          </div>
-          <div class="ctrl-section" id="cols-section" style="display:none">
-            <div class="ctrl-label">Columns</div>
-            <div class="col-list" id="col-list"></div>
-          </div>
+          <div class="upload-status" id="upload-status"></div>
+
+          ${_tableSection('config-tables-wrap', 'Configuration Tables', 'config-meta-tbody')}
+          ${_tableSection('custom-tables-wrap', 'Customizing Tables', 'custom-meta-tbody')}
+
         </div>
       </div>
 
@@ -74,7 +105,7 @@ function _html() {
         <div class="panel-body" style="padding:0;position:relative;">
           <div class="empty-state" id="graph-empty">
             <div class="es-icon">◈</div>
-            <div>Load a table to begin</div>
+            <div>Upload a table to begin</div>
           </div>
           <svg id="graph-svg" style="display:none"></svg>
         </div>
@@ -98,67 +129,130 @@ function _html() {
   `;
 }
 
+// ── Clock ──────────────────────────────────────────────────────────────────
+
 function _startClock(container) {
   const el = container.querySelector('#clock');
   const tick = () => { el.textContent = new Date().toTimeString().slice(0, 8); };
   tick();
   const id = setInterval(tick, 1000);
-  // Stop clock when view unmounts
   const stop = new MutationObserver(() => { if (!document.contains(el)) { clearInterval(id); stop.disconnect(); } });
   stop.observe(container, { childList: true });
 }
 
-async function _loadTables(container) {
+// ── Tables metadata list ───────────────────────────────────────────────────
+
+async function _loadTablesMeta(container) {
   try {
-    const tables = await api.get('/api/tables');
-    const sel = container.querySelector('#table-select');
-    tables.forEach(t => {
-      const opt = document.createElement('option');
-      opt.value = opt.textContent = t;
-      sel.appendChild(opt);
-    });
+    const tables = await api.get('/api/tables/info');
+    _renderTablesMeta(container, tables);
   } catch (err) {
     toast(`Failed to load tables: ${err.message}`, 'err');
   }
+}
 
-  container.querySelector('#btn-load').addEventListener('click', () => {
-    const table = container.querySelector('#table-select').value;
-    if (!table) { toast('Select a table first.', 'warn'); return; }
-    _fetchTableData(container, table);
+function _renderTablesMeta(container, tables) {
+  const configTbody = container.querySelector('#config-meta-tbody');
+  const customTbody = container.querySelector('#custom-meta-tbody');
+
+  const configTables = tables.filter(t => ['master', 'configuration'].includes(_classifyTable(t.table)));
+  const customTables  = tables.filter(t => _classifyTable(t.table) === 'customizing');
+
+  _fillTbody(configTbody, configTables, 'No configuration tables', container);
+  _fillTbody(customTbody, customTables, 'No customizing tables', container);
+}
+
+function _fillTbody(tbody, tables, emptyMsg, container) {
+  if (!tables.length) {
+    tbody.innerHTML = `<tr><td colspan="6" class="meta-empty">${emptyMsg}</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = tables.map(t => `
+    <tr>
+      <td class="mt-name">${t.table}</td>
+      <td>${t.system}</td>
+      <td>${t.client}</td>
+      <td>${t.date}</td>
+      <td>${t.count}</td>
+      <td><button class="btn danger mt-del" data-table="${t.table}" style="padding:2px 8px;font-size:10px;">DELETE</button></td>
+    </tr>
+  `).join('');
+
+  tbody.querySelectorAll('.mt-del').forEach(btn => {
+    btn.addEventListener('click', () => _deleteTable(container, btn.dataset.table));
   });
 }
 
-async function _fetchTableData(container, table) {
+async function _deleteTable(container, table) {
   try {
-    const { rows, columns } = await api.get(`/api/tables/${encodeURIComponent(table)}/data`);
-    setState('rows', rows);
-    setState('columns', columns);
-    setState('currentTable', table);
-    _refreshStats(container, rows, columns);
-    _refreshColumns(container, columns);
-    _refreshTable(container, rows);
+    await api.delete(`/api/tables/${encodeURIComponent(table)}`);
+    await _loadTablesMeta(container);
   } catch (err) {
-    toast(`Failed to load "${table}": ${err.message}`, 'err');
+    toast(`Delete failed: ${err.message}`, 'err');
   }
 }
 
-function _refreshStats(container, rows, columns) {
-  container.querySelector('#stat-rows').textContent = rows.length;
-  container.querySelector('#stat-cols').textContent = columns.length;
-  container.querySelector('#stats-section').style.display = '';
+// ── Upload (drag & drop + link) ────────────────────────────────────────────
+
+function _initUpload(container) {
+  const zone     = container.querySelector('#drop-zone');
+  const input    = container.querySelector('#upload-input');
+  const link     = container.querySelector('#upload-link');
+  const statusEl = container.querySelector('#upload-status');
+
+  // Upload link triggers file picker
+  link.addEventListener('click', (e) => { e.preventDefault(); input.click(); });
+
+  // Drag events
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('dz-over'); });
+  zone.addEventListener('dragleave', () => zone.classList.remove('dz-over'));
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    zone.classList.remove('dz-over');
+    const file = e.dataTransfer.files[0];
+    if (file) _handleFile(file, container, statusEl);
+  });
+
+  // File picker selection
+  input.addEventListener('change', () => {
+    const file = input.files[0];
+    input.value = '';
+    if (file) _handleFile(file, container, statusEl);
+  });
 }
 
-function _refreshColumns(container, columns) {
-  const list = container.querySelector('#col-list');
-  list.innerHTML = columns.map(c => `
-    <div class="col-list-item">
-      <span class="cli-tech">${c}</span>
-    </div>
-  `).join('');
-  container.querySelector('#cols-section').style.display = '';
+async function _handleFile(file, container, statusEl) {
+  // General validation
+  if (!_FILENAME_RE.test(file.name)) {
+    toast(
+      `Invalid filename: "${file.name}"\n\nExpected: {TABLENAME}_{SYSTEM}_{CLIENT}_{DATE}.xlsx\nExample: DD03L_DO2_100_20240406.xlsx`,
+      'err'
+    );
+    return;
+  }
+
+  statusEl.textContent = `Uploading ${file.name}…`;
+  statusEl.className = 'upload-status';
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try {
+    const result = await api.upload('/api/upload', formData);
+    statusEl.textContent = `✓ Inserted ${result.rows_inserted} rows into "${result.table}"`;
+    statusEl.className = 'upload-status ok';
+    const _clearStatus = () => { statusEl.textContent = ''; statusEl.className = 'upload-status'; document.removeEventListener('click', _clearStatus); };
+    document.addEventListener('click', _clearStatus);
+    await _loadTablesMeta(container);
+  } catch (err) {
+    statusEl.textContent = '';
+    toast(`Upload failed: ${err.message}`, 'err');
+  }
 }
 
-function _refreshTable(container, rows) {
+// ── Right panel data table ─────────────────────────────────────────────────
+
+function _refreshDataTable(container, rows) {
   const emptyEl = container.querySelector('#table-empty');
   const wrapEl  = container.querySelector('#table-wrap');
   if (!rows || !rows.length) {

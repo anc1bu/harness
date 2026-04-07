@@ -25,10 +25,29 @@ async function request(method, path, body) {
   return text ? JSON.parse(text) : null;
 }
 
+async function upload(path, formData) {
+  const token = localStorage.getItem('token');
+  const headers = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  const res = await fetch(BASE + path, { method: 'POST', headers, body: formData });
+
+  if (!res.ok) {
+    const text = await res.text();
+    let message;
+    try { message = JSON.parse(text).error || text; } catch { message = text; }
+    throw new Error(message || `HTTP ${res.status}`);
+  }
+
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
+}
+
 export const api = {
-  get:    (path)        => request('GET',    path),
-  post:   (path, body)  => request('POST',   path, body),
-  put:    (path, body)  => request('PUT',    path, body),
-  patch:  (path, body)  => request('PATCH',  path, body),
-  delete: (path)        => request('DELETE', path),
+  get:    (path)             => request('GET',    path),
+  post:   (path, body)       => request('POST',   path, body),
+  put:    (path, body)       => request('PUT',    path, body),
+  patch:  (path, body)       => request('PATCH',  path, body),
+  delete: (path)             => request('DELETE', path),
+  upload: (path, formData)   => upload(path, formData),
 };
