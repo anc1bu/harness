@@ -57,3 +57,4 @@ python3 server.py      # http://localhost:5000 — default login: admin / admin
 - All data storage must use **SQLite** — no JSON files for data, regardless of size.
 - Test/debug Excel files go in `test-excel/`.
 
+# test deploy Tue Apr  7 06:37:00 PM CEST 2026
