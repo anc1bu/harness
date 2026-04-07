@@ -1,6 +1,7 @@
 // Settings view — user customization and database table management.
 
 import { api } from '../api.js';
+import { logout } from '../auth.js';
 import { navigate } from '../router.js';
 import { toast } from '../components/modal.js';
 
@@ -10,7 +11,10 @@ export function mount(container) {
   container.innerHTML = `
     <div id="topbar">
       <div class="logo">HARNESS <span>//</span> SAPCONS</div>
-      <button class="btn inline" id="btn-back" style="margin:0">Back to Dashboard</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn inline" id="btn-back" style="margin:0">Back to Dashboard</button>
+        <button class="btn inline danger" id="btn-logout" style="margin:0">Logout</button>
+      </div>
     </div>
     <div id="settings-view">
       <div class="settings-layout">
@@ -23,6 +27,10 @@ export function mount(container) {
   `;
 
   container.querySelector('#btn-back').addEventListener('click', () => navigate('#/dashboard'));
+  container.querySelector('#btn-logout').addEventListener('click', async () => {
+    await logout();
+    navigate('#/login');
+  });
 
   const navItems = container.querySelectorAll('.snav-item');
   navItems.forEach(item => {

@@ -7,6 +7,7 @@ import { getState, subscribe, unsubscribe } from '../state.js';
 import { toast } from '../components/modal.js';
 import { renderTable } from '../components/table.js';
 
+
 // ── General validation ─────────────────────────────────────────────────────
 const _FILENAME_RE = /^([A-Za-z0-9]+)_([A-Za-z0-9]+)_([A-Za-z0-9]+)_(\d+)\.xlsx$/i;
 
@@ -26,6 +27,18 @@ export function mount(container) {
   _startClock(container);
   _loadTablesMeta(container);
   _initUpload(container);
+
+  const user     = getState('user');
+  const customer = getState('customer');
+
+  if (user?.is_admin) {
+    const adminBtn = container.querySelector('#btn-admin');
+    adminBtn.style.display = '';
+    adminBtn.addEventListener('click', () => navigate('#/admin'));
+  }
+
+  const custLabel = container.querySelector('#customer-badge');
+  if (customer) custLabel.textContent = `${customer.custname} — ${customer.name}`;
 
   container.querySelector('#btn-logout').addEventListener('click', async () => {
     await logout();
@@ -75,8 +88,10 @@ function _html() {
     <div id="topbar">
       <div class="logo">HARNESS <span>//</span> SAPCONS</div>
       <div style="display:flex;align-items:center;gap:16px">
+        <div class="cust-badge" id="customer-badge"></div>
         <div class="clock" id="clock">--:--:--</div>
         <div class="topbar-nav">
+          <button class="btn inline" id="btn-admin" style="display:none">Admin</button>
           <button class="btn inline" id="btn-settings">Settings</button>
           <button class="btn inline danger" id="btn-logout">Logout</button>
         </div>
@@ -151,8 +166,8 @@ function _renderTablesMeta(container, tables) {
   const configTbody = container.querySelector('#config-meta-tbody');
   const customTbody = container.querySelector('#custom-meta-tbody');
 
-  const configTables = tables.filter(t => ['master', 'configuration'].includes(_classifyTable(t.table)));
-  const customTables  = tables.filter(t => _classifyTable(t.table) === 'customizing');
+  const configTables = tables.filter(t => ['master', 'configuration'].includes(_classifyTable(t.orig_table)));
+  const customTables  = tables.filter(t => _classifyTable(t.orig_table) === 'customizing');
 
   _fillTbody(configTbody, configTables, 'No configuration tables', container);
   _fillTbody(customTbody, customTables, 'No customizing tables', container);
@@ -165,7 +180,7 @@ function _fillTbody(tbody, tables, emptyMsg, container) {
   }
   tbody.innerHTML = tables.map(t => `
     <tr>
-      <td class="mt-name">${t.table}</td>
+      <td class="mt-name">${t.orig_table}</td>
       <td>${t.system}</td>
       <td>${t.client}</td>
       <td>${t.date}</td>
@@ -235,7 +250,7 @@ async function _handleFile(file, container, statusEl) {
 
   try {
     const result = await api.upload('/api/upload', formData);
-    statusEl.textContent = `✓ Inserted ${result.rows_inserted} rows into "${result.table}"`;
+    statusEl.textContent = `✓ Inserted ${result.rows_inserted} rows into "${result.orig_table}"`;
     statusEl.className = 'upload-status ok';
     document.addEventListener('click', () => { statusEl.textContent = ''; statusEl.className = 'upload-status'; }, { once: true });
     await _loadTablesMeta(container);

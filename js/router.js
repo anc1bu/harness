@@ -2,9 +2,11 @@
 // Routes map hash strings (e.g. '#/dashboard') to view modules with a mount(container) export.
 
 import { isAuthenticated } from './auth.js';
+import { getState } from './state.js';
 
 const routes = {};
 const PUBLIC_ROUTES = new Set(['#/login']);
+const ADMIN_ROUTES  = new Set(['#/admin']);
 let appEl = null;
 
 export function register(hash, viewModule) {
@@ -30,8 +32,24 @@ async function _render() {
   }
 
   if (isAuthenticated() && hash === '#/login') {
-    navigate('#/dashboard');
+    const user = getState('user');
+    const hasCust = !!localStorage.getItem('custname');
+    navigate((!hasCust && user?.is_admin) ? '#/admin' : '#/dashboard');
     return;
+  }
+
+  // Authenticated but no customer selected — only admin pages are accessible
+  if (isAuthenticated() && !localStorage.getItem('custname') && !ADMIN_ROUTES.has(hash)) {
+    navigate('#/admin');
+    return;
+  }
+
+  if (ADMIN_ROUTES.has(hash)) {
+    const user = getState('user');
+    if (!user?.is_admin) {
+      navigate('#/dashboard');
+      return;
+    }
   }
 
   const view = routes[hash];

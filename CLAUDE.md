@@ -22,7 +22,6 @@ harness-dev/
 │   │   └── settings.js
 │   └── components/     # Reusable UI pieces
 │       ├── modal.js    # toast(msg, type) — 'ok' | 'warn' | 'err'
-│       ├── graph.js    # D3 force-directed relationship graph
 │       └── table.js    # Data table renderer (200-row preview)
 └── css/
     └── theme.css       # CSS variables and base styles
@@ -40,7 +39,7 @@ harness-dev/
 
 Flask + `sqlite3`. All API routes require a Bearer token (session stored in `sessions` table). Routes:
 - `POST /api/auth/login` / `POST /api/auth/logout`
-- `GET /api/tables`, `GET /api/tables/info`, `GET /api/tables/<table>/data`, `DELETE /api/tables/<table>`
+- `GET /api/tables`, `GET /api/tables/info`, `DELETE /api/tables/<table>`
 - `POST /api/upload` — multipart Excel upload; filename must match `{TABLE}_{SYSTEM}_{CLIENT}_{DATE}.xlsx`
 - `GET /api/users`, `POST /api/users`
 - Everything else → `index.html` (SPA fallback)

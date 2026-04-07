@@ -1,7 +1,21 @@
 // Single fetch wrapper for all backend calls.
 // Attaches auth token and normalizes errors into thrown Error objects.
 
+import { toast } from './components/modal.js';
+
 const BASE = '';
+
+function _handleUnauthorized() {
+  localStorage.removeItem('token');
+  localStorage.removeItem('custname');
+  localStorage.removeItem('custname_label');
+  localStorage.removeItem('user');
+  toast('Session expired. Please log in again.', 'err');
+  document.getElementById('modal-ok').addEventListener('click', () => {
+    location.hash = '#/login';
+  }, { once: true });
+  return null;
+}
 
 async function request(method, path, body) {
   const token = localStorage.getItem('token');
@@ -14,10 +28,13 @@ async function request(method, path, body) {
     ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
   });
 
+  // Only trigger session expiry if we actually sent a token (not a failed login)
+  if (res.status === 401 && token) return _handleUnauthorized();
+
   if (!res.ok) {
     const text = await res.text();
     let message;
-    try { message = JSON.parse(text).error || text; } catch { message = text; }
+    try { message = JSON.parse(text).error || text; } catch { message = `Server error (HTTP ${res.status})`; }
     throw new Error(message || `HTTP ${res.status}`);
   }
 
@@ -32,10 +49,12 @@ async function upload(path, formData) {
 
   const res = await fetch(BASE + path, { method: 'POST', headers, body: formData });
 
+  if (res.status === 401 && token) return _handleUnauthorized();
+
   if (!res.ok) {
     const text = await res.text();
     let message;
-    try { message = JSON.parse(text).error || text; } catch { message = text; }
+    try { message = JSON.parse(text).error || text; } catch { message = `Server error (HTTP ${res.status})`; }
     throw new Error(message || `HTTP ${res.status}`);
   }
 
@@ -44,8 +63,9 @@ async function upload(path, formData) {
 }
 
 export const api = {
-  get:    (path)             => request('GET',    path),
-  post:   (path, body)       => request('POST',   path, body),
-  delete: (path)             => request('DELETE', path),
-  upload: (path, formData)   => upload(path, formData),
+  get:    (path)           => request('GET',    path),
+  post:   (path, body)     => request('POST',   path, body),
+  patch:  (path, body)     => request('PATCH',  path, body),
+  delete: (path)           => request('DELETE', path),
+  upload: (path, formData) => upload(path, formData),
 };

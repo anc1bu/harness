@@ -3,6 +3,7 @@
 
 const _state = {
   user: null,
+  customer: null,
   rows: [],
   columns: [],
 };

@@ -18,21 +18,13 @@ import openpyxl
 app = Flask(__name__, static_folder='.', static_url_path='')
 DB_PATH = os.path.join(os.path.dirname(__file__), 'db', 'harness.db')
 
-_UPLOAD_RE = re.compile(r'^([A-Za-z0-9]+)_([A-Za-z0-9]+)_([A-Za-z0-9]+)_(\d+)\.xlsx$', re.IGNORECASE)
-_SYSTEM_TABLES = ('users', 'sessions', '_table_meta')
+_UPLOAD_RE   = re.compile(r'^([A-Za-z0-9]+)_([A-Za-z0-9]+)_([A-Za-z0-9]+)_(\d+)\.xlsx$', re.IGNORECASE)
+_CUSTNAME_RE = re.compile(r'^[A-Za-z0-9]{3}$')
+_SYSTEM_TABLES = ('users', 'sessions', '_table_meta', 'customers', 'user_customers')
 
 # ── Table type classification ──────────────────────────────────────────────
 
 def _determine_table_type(name, headers, data_rows):
-    """Determines and returns the table type: 'master', 'configuration', or 'customizing'.
-
-    This must be called before any validation so the correct ruleset is applied.
-
-    Classification rules:
-      - DD03L                  → master
-      - Any other DD* table    → configuration
-      - Everything else        → customizing
-    """
     upper = name.upper()
     if upper == 'DD03L':
         return 'master'
@@ -56,7 +48,7 @@ def _validate_headers_technical(headers, table_name, table_type):
     return None
 
 
-def _validate_master(table_name, headers, data_rows, table_type):
+def _validate_master(table_name, headers, data_rows, table_type, dd03l_db_name):
     """Validations for master tables (e.g. DD03L)."""
     t = f'[{table_type}]'
 
@@ -104,7 +96,7 @@ def _validate_master(table_name, headers, data_rows, table_type):
     if 'DD03L' not in all_tabnames:
         with get_db() as conn:
             rows = conn.execute(
-                "SELECT FIELDNAME FROM DD03L WHERE TABNAME = ? AND ROLLNAME IS NOT NULL AND ROLLNAME != ''",
+                f'SELECT FIELDNAME FROM "{dd03l_db_name}" WHERE TABNAME = ? AND ROLLNAME IS NOT NULL AND ROLLNAME != \'\'',
                 (table_name.upper(),)
             ).fetchall()
             fieldname_vals = {r[0].strip() for r in rows if r[0] is not None}
@@ -120,19 +112,20 @@ def _validate_master(table_name, headers, data_rows, table_type):
     return None
 
 
-def _validate_dd_headers(table_name, headers, table_type, check_v8=True):
+def _validate_dd_headers(table_name, headers, table_type, dd03l_db_name, check_v8=True):
     """Shared DD03L prerequisite + header match check (V6, V7, V8, V9)."""
     t = f'[{table_type}]'
     with get_db() as conn:
         dd03l_exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='DD03L'"
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (dd03l_db_name,)
         ).fetchone()
-        dd03l_count = conn.execute("SELECT COUNT(*) FROM DD03L").fetchone()[0] if dd03l_exists else 0
+        dd03l_count = conn.execute(f'SELECT COUNT(*) FROM "{dd03l_db_name}"').fetchone()[0] if dd03l_exists else 0
         if not dd03l_exists or dd03l_count == 0:
             return f'[V6]{t} DD03L master table is not loaded. Upload DD03L before uploading {table_type} tables.'
 
         master_count = conn.execute(
-            "SELECT COUNT(*) FROM DD03L WHERE TABNAME = 'DD03L'"
+            f'SELECT COUNT(*) FROM "{dd03l_db_name}" WHERE TABNAME = \'DD03L\''
         ).fetchone()[0]
         if master_count < 30:
             return (
@@ -142,37 +135,32 @@ def _validate_dd_headers(table_name, headers, table_type, check_v8=True):
 
         if check_v8:
             exists_in_dd03l = conn.execute(
-                "SELECT 1 FROM DD03L WHERE TABNAME = ?", (table_name.upper(),)
+                f'SELECT 1 FROM "{dd03l_db_name}" WHERE TABNAME = ?', (table_name.upper(),)
             ).fetchone()
             if not exists_in_dd03l:
                 return f'[V8]{t} no entries in master table (DD03L) for {table_name}.'
 
         rows = conn.execute(
-            "SELECT FIELDNAME FROM DD03L WHERE TABNAME = ? AND ROLLNAME IS NOT NULL AND ROLLNAME != ''",
+            f'SELECT FIELDNAME FROM "{dd03l_db_name}" WHERE TABNAME = ? AND ROLLNAME IS NOT NULL AND ROLLNAME != \'\'',
             (table_name.upper(),)
         ).fetchall()
         fieldname_vals = {r[0].strip() for r in rows if r[0] is not None}
 
         headers_set = set(headers)
-        if headers_set != fieldname_vals:
-            extra   = sorted(headers_set - fieldname_vals)
-            missing = sorted(fieldname_vals - headers_set)
-            parts = []
-            if extra:   parts.append(f'extra columns: {", ".join(extra)}')
-            if missing: parts.append(f'missing columns: {", ".join(missing)}')
-            return f'[V9]{t} First upload DD03L file with {table_name} entries.'
+        not_in_dd03l = sorted(headers_set - fieldname_vals)
+        if not_in_dd03l:
+            sample = ', '.join(not_in_dd03l[:5]) + (' …' if len(not_in_dd03l) > 5 else '')
+            return f'[V9]{t} First upload DD03L file with {table_name} entries. Missing Fields: {sample}'
 
     return None
 
 
-def _validate_configuration(table_name, headers, data_rows, table_type):
-    """Validations for configuration tables (DD*)."""
-    return _validate_dd_headers(table_name, headers, table_type, check_v8=True)
+def _validate_configuration(table_name, headers, data_rows, table_type, dd03l_db_name):
+    return _validate_dd_headers(table_name, headers, table_type, dd03l_db_name, check_v8=True)
 
 
-def _validate_customizing(table_name, headers, data_rows, table_type):
-    """Validations for customizing tables."""
-    return _validate_dd_headers(table_name, headers, table_type, check_v8=False)
+def _validate_customizing(table_name, headers, data_rows, table_type, dd03l_db_name):
+    return _validate_dd_headers(table_name, headers, table_type, dd03l_db_name, check_v8=False)
 
 
 # ── Database helpers ───────────────────────────────────────────────────────
@@ -186,35 +174,73 @@ def get_db():
 
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-    with get_db() as conn:
-        conn.executescript('''
-            CREATE TABLE IF NOT EXISTS users (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                username      TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS sessions (
-                token      TEXT PRIMARY KEY,
-                user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS _table_meta (
-                table_name TEXT PRIMARY KEY,
-                system     TEXT NOT NULL,
-                client     TEXT NOT NULL,
-                date       TEXT NOT NULL
-            );
-        ''')
-        # Create a default admin user if no users exist
-        if not conn.execute('SELECT 1 FROM users').fetchone():
-            conn.execute(
-                'INSERT INTO users (username, password_hash) VALUES (?, ?)',
-                ('admin', _hash('admin'))
-            )
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+
+    conn.executescript('''
+        CREATE TABLE IF NOT EXISTS users (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            username      TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            is_admin      INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS sessions (
+            token      TEXT PRIMARY KEY,
+            user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            custname   TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS _table_meta (
+            table_name TEXT PRIMARY KEY,
+            custname   TEXT,
+            orig_table TEXT,
+            system     TEXT NOT NULL,
+            client     TEXT NOT NULL,
+            date       TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS customers (
+            custname TEXT PRIMARY KEY,
+            name     TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS user_customers (
+            user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            custname TEXT NOT NULL REFERENCES customers(custname) ON DELETE CASCADE,
+            PRIMARY KEY (user_id, custname)
+        );
+    ''')
+
+    # Schema migrations for existing DBs (idempotent)
+    for sql in [
+        'ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0',
+        'ALTER TABLE sessions ADD COLUMN custname TEXT',
+        'ALTER TABLE _table_meta ADD COLUMN custname TEXT',
+        'ALTER TABLE _table_meta ADD COLUMN orig_table TEXT',
+    ]:
+        try:
+            conn.execute(sql)
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
+    # Ensure admin user has is_admin=1
+    conn.execute("UPDATE users SET is_admin = 1 WHERE username = 'admin'")
+
+    # Create default admin user if no users exist
+    if not conn.execute('SELECT 1 FROM users').fetchone():
+        conn.execute(
+            'INSERT INTO users (username, password_hash, is_admin) VALUES (?, ?, 1)',
+            ('admin', _hash('admin'))
+        )
+
+    conn.commit()
+    conn.close()
 
 
 def _hash(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
+
+
+def _get_token():
+    return request.headers.get('Authorization', '').removeprefix('Bearer ')
 
 
 # ── Auth helpers ───────────────────────────────────────────────────────────
@@ -222,13 +248,26 @@ def _hash(password: str) -> str:
 def require_auth(f):
     @wraps(f)
     def wrapper(*args, **kwargs):
-        token = request.headers.get('Authorization', '').removeprefix('Bearer ')
         with get_db() as conn:
             session = conn.execute(
-                'SELECT user_id FROM sessions WHERE token = ?', (token,)
+                'SELECT user_id FROM sessions WHERE token = ?', (_get_token(),)
             ).fetchone()
         if not session:
             return jsonify({'error': 'Unauthorized'}), 401
+        return f(*args, **kwargs)
+    return wrapper
+
+
+def require_admin(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        with get_db() as conn:
+            row = conn.execute(
+                'SELECT u.is_admin FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?',
+                (_get_token(),)
+            ).fetchone()
+        if not row or not row['is_admin']:
+            return jsonify({'error': 'Admin access required'}), 403
         return f(*args, **kwargs)
     return wrapper
 
@@ -249,52 +288,102 @@ def login():
             (username, _hash(password))
         ).fetchone()
         if not user:
-            return jsonify({'error': 'Invalid credentials'}), 401
+            return jsonify({'error': 'Invalid credentials'}), 400
 
         token = secrets.token_hex(32)
         conn.execute('INSERT INTO sessions (token, user_id) VALUES (?, ?)', (token, user['id']))
 
-    return jsonify({'token': token, 'user': {'id': user['id'], 'username': user['username']}})
+        customers = conn.execute(
+            'SELECT c.custname, c.name FROM customers c '
+            'JOIN user_customers uc ON c.custname = uc.custname '
+            'WHERE uc.user_id = ? ORDER BY c.custname',
+            (user['id'],)
+        ).fetchall()
+
+    return jsonify({
+        'token': token,
+        'user': {'id': user['id'], 'username': user['username'], 'is_admin': bool(user['is_admin'])},
+        'customers': [{'custname': r['custname'], 'name': r['name']} for r in customers],
+    })
+
+
+@app.post('/api/auth/select-customer')
+@require_auth
+def select_customer():
+    data = request.json or {}
+    custname = data.get('custname', '').strip().upper()
+    token = _get_token()
+
+    with get_db() as conn:
+        session = conn.execute('SELECT user_id FROM sessions WHERE token = ?', (token,)).fetchone()
+        assigned = conn.execute(
+            'SELECT 1 FROM user_customers WHERE user_id = ? AND custname = ?',
+            (session['user_id'], custname)
+        ).fetchone()
+        if not assigned:
+            return jsonify({'error': 'Customer not assigned to this user'}), 403
+        conn.execute('UPDATE sessions SET custname = ? WHERE token = ?', (custname, token))
+
+    return jsonify({'ok': True})
 
 
 @app.post('/api/auth/logout')
 @require_auth
 def logout():
-    token = request.headers.get('Authorization', '').removeprefix('Bearer ')
     with get_db() as conn:
-        conn.execute('DELETE FROM sessions WHERE token = ?', (token,))
+        conn.execute('DELETE FROM sessions WHERE token = ?', (_get_token(),))
     return jsonify({'ok': True})
 
 
 # ── Table routes ───────────────────────────────────────────────────────────
 
+def _session_custname():
+    with get_db() as conn:
+        session = conn.execute(
+            'SELECT custname FROM sessions WHERE token = ?', (_get_token(),)
+        ).fetchone()
+    return session['custname'] if session else None
+
+
 @app.get('/api/tables')
 @require_auth
 def list_tables():
+    custname = _session_custname()
+    if not custname:
+        return jsonify([])
     with get_db() as conn:
         rows = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table'"
-            " AND name NOT IN ('users','sessions','_table_meta') ORDER BY name"
+            "SELECT table_name FROM _table_meta WHERE custname = ? ORDER BY orig_table",
+            (custname,)
         ).fetchall()
-    return jsonify([r['name'] for r in rows])
+    return jsonify([r['table_name'] for r in rows])
 
 
 @app.get('/api/tables/info')
 @require_auth
 def list_tables_info():
+    custname = _session_custname()
+    if not custname:
+        return jsonify([])
     with get_db() as conn:
         meta = conn.execute(
-            'SELECT table_name, system, client, date FROM _table_meta ORDER BY table_name'
+            'SELECT table_name, orig_table, system, client, date FROM _table_meta '
+            'WHERE custname = ? ORDER BY orig_table',
+            (custname,)
         ).fetchall()
         result = []
         for r in meta:
-            count = conn.execute(f'SELECT COUNT(*) FROM "{r["table_name"]}"').fetchone()[0]
+            try:
+                count = conn.execute(f'SELECT COUNT(*) FROM "{r["table_name"]}"').fetchone()[0]
+            except Exception:
+                count = 0
             result.append({
-                'table': r['table_name'],
-                'system': r['system'],
-                'client': r['client'],
-                'date': r['date'],
-                'count': count,
+                'table':      r['table_name'],
+                'orig_table': r['orig_table'] or r['table_name'],
+                'system':     r['system'],
+                'client':     r['client'],
+                'date':       r['date'],
+                'count':      count,
             })
     return jsonify(result)
 
@@ -302,10 +391,16 @@ def list_tables_info():
 @app.delete('/api/tables/<table>')
 @require_auth
 def drop_table(table):
+    custname = _session_custname()
     with get_db() as conn:
+        meta = conn.execute(
+            "SELECT 1 FROM _table_meta WHERE table_name = ? AND custname = ?",
+            (table, custname)
+        ).fetchone()
+        if not meta:
+            return jsonify({'error': 'Table not found'}), 404
         exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?"
-            " AND name NOT IN ('users','sessions','_table_meta')", (table,)
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?", (table,)
         ).fetchone()
         if not exists:
             return jsonify({'error': 'Table not found'}), 404
@@ -319,6 +414,10 @@ def drop_table(table):
 @app.post('/api/upload')
 @require_auth
 def upload_excel():
+    custname = _session_custname()
+    if not custname:
+        return jsonify({'error': 'No customer selected. Please log in again.'}), 422
+
     if 'file' not in request.files:
         return jsonify({'error': 'No file provided'}), 400
 
@@ -335,6 +434,9 @@ def upload_excel():
 
     if table_name.lower() in _SYSTEM_TABLES:
         return jsonify({'error': f'Table "{table_name}" is protected'}), 403
+
+    db_table_name = f'{custname}_{system}_{table_name}'
+    dd03l_db_name = f'{custname}_{system}_DD03L'
 
     try:
         wb = openpyxl.load_workbook(BytesIO(f.read()), read_only=True, data_only=True)
@@ -365,11 +467,11 @@ def upload_excel():
 
     # ── Step 3: Run type-specific validations ─────────────────────────────────
     if table_type == 'master':
-        err = _validate_master(table_name, headers, data_rows, table_type)
+        err = _validate_master(table_name, headers, data_rows, table_type, dd03l_db_name)
     elif table_type == 'configuration':
-        err = _validate_configuration(table_name, headers, data_rows, table_type)
+        err = _validate_configuration(table_name, headers, data_rows, table_type, dd03l_db_name)
     else:
-        err = _validate_customizing(table_name, headers, data_rows, table_type)
+        err = _validate_customizing(table_name, headers, data_rows, table_type, dd03l_db_name)
     if err:
         return jsonify({'error': err}), 422
 
@@ -386,7 +488,7 @@ def upload_excel():
     else:
         with get_db() as conn:
             rows = conn.execute(
-                "SELECT FIELDNAME FROM DD03L WHERE TABNAME = ? AND KEYFLAG = 'X'",
+                f'SELECT FIELDNAME FROM "{dd03l_db_name}" WHERE TABNAME = ? AND KEYFLAG = \'X\'',
                 (table_name.upper(),)
             ).fetchall()
             key_fields = {r[0].strip() for r in rows if r[0] is not None}
@@ -403,13 +505,15 @@ def upload_excel():
     else:
         col_defs = ', '.join(_col_def(h) for h in headers)
 
+    col_names    = ', '.join(f'"{h}"' for h in headers)
     placeholders = ', '.join('?' for _ in headers)
 
     with get_db() as conn:
-        conn.execute(f'CREATE TABLE IF NOT EXISTS "{table_name}" ({col_defs})')
+        conn.execute(f'CREATE TABLE IF NOT EXISTS "{db_table_name}" ({col_defs})')
         conn.execute(
-            'INSERT OR REPLACE INTO _table_meta (table_name, system, client, date) VALUES (?, ?, ?, ?)',
-            (table_name, system, client, date)
+            'INSERT OR REPLACE INTO _table_meta (table_name, custname, orig_table, system, client, date) '
+            'VALUES (?, ?, ?, ?, ?, ?)',
+            (db_table_name, custname, table_name, system, client, date)
         )
         rows_inserted = 0
         for row in data_rows:
@@ -417,10 +521,65 @@ def upload_excel():
                 str(row[i]) if i < len(row) and row[i] is not None else None
                 for i in range(len(headers))
             ]
-            conn.execute(f'INSERT OR REPLACE INTO "{table_name}" VALUES ({placeholders})', values)
+            conn.execute(
+                f'INSERT OR REPLACE INTO "{db_table_name}" ({col_names}) VALUES ({placeholders})',
+                values
+            )
             rows_inserted += 1
 
-    return jsonify({'ok': True, 'table': table_name, 'table_type': table_type, 'rows_inserted': rows_inserted})
+    return jsonify({
+        'ok': True,
+        'table': db_table_name,
+        'orig_table': table_name,
+        'table_type': table_type,
+        'rows_inserted': rows_inserted,
+    })
+
+
+# ── Customer routes ────────────────────────────────────────────────────────
+
+@app.get('/api/customers')
+@require_auth
+def list_customers():
+    with get_db() as conn:
+        rows = conn.execute('SELECT custname, name FROM customers ORDER BY custname').fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.post('/api/customers')
+@require_auth
+@require_admin
+def create_customer():
+    data = request.json or {}
+    custname = data.get('custname', '').strip().upper()
+    name = data.get('name', '').strip()
+
+    if not _CUSTNAME_RE.match(custname):
+        return jsonify({'error': 'Customer code must be exactly 3 alphanumeric characters'}), 400
+    if not name:
+        return jsonify({'error': 'Customer name is required'}), 400
+
+    with get_db() as conn:
+        try:
+            conn.execute('INSERT INTO customers (custname, name) VALUES (?, ?)', (custname, name))
+        except sqlite3.IntegrityError:
+            return jsonify({'error': f'Customer "{custname}" already exists'}), 409
+
+    return jsonify({'ok': True}), 201
+
+
+@app.delete('/api/customers/<custname>')
+@require_auth
+@require_admin
+def delete_customer(custname):
+    with get_db() as conn:
+        exists = conn.execute(
+            'SELECT 1 FROM customers WHERE custname = ?', (custname.upper(),)
+        ).fetchone()
+        if not exists:
+            return jsonify({'error': 'Customer not found'}), 404
+        conn.execute('DELETE FROM customers WHERE custname = ?', (custname.upper(),))
+    return jsonify({'ok': True})
 
 
 # ── User management routes ─────────────────────────────────────────────────
@@ -429,12 +588,15 @@ def upload_excel():
 @require_auth
 def list_users():
     with get_db() as conn:
-        users = conn.execute('SELECT id, username FROM users ORDER BY username').fetchall()
+        users = conn.execute(
+            'SELECT id, username, is_admin FROM users ORDER BY username'
+        ).fetchall()
     return jsonify([dict(u) for u in users])
 
 
 @app.post('/api/users')
 @require_auth
+@require_admin
 def create_user():
     data = request.json or {}
     username = data.get('username', '').strip()
@@ -454,12 +616,76 @@ def create_user():
     return jsonify({'ok': True}), 201
 
 
+@app.patch('/api/users/<int:user_id>')
+@require_auth
+@require_admin
+def update_user(user_id):
+    data = request.json or {}
+    with get_db() as conn:
+        user = conn.execute('SELECT username FROM users WHERE id = ?', (user_id,)).fetchone()
+        if not user:
+            return jsonify({'error': 'User not found'}), 404
+        if 'is_admin' in data:
+            if user['username'] == 'admin' and not data['is_admin']:
+                return jsonify({'error': 'Cannot remove admin role from "admin" user'}), 403
+            conn.execute(
+                'UPDATE users SET is_admin = ? WHERE id = ?',
+                (1 if data['is_admin'] else 0, user_id)
+            )
+    return jsonify({'ok': True})
+
+
+@app.get('/api/users/<int:user_id>/customers')
+@require_auth
+@require_admin
+def get_user_customers(user_id):
+    with get_db() as conn:
+        rows = conn.execute(
+            'SELECT c.custname, c.name FROM customers c '
+            'JOIN user_customers uc ON c.custname = uc.custname '
+            'WHERE uc.user_id = ? ORDER BY c.custname',
+            (user_id,)
+        ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.post('/api/users/<int:user_id>/customers')
+@require_auth
+@require_admin
+def assign_customer_to_user(user_id):
+    data = request.json or {}
+    custname = data.get('custname', '').strip().upper()
+    with get_db() as conn:
+        if not conn.execute('SELECT 1 FROM users WHERE id = ?', (user_id,)).fetchone():
+            return jsonify({'error': 'User not found'}), 404
+        if not conn.execute('SELECT 1 FROM customers WHERE custname = ?', (custname,)).fetchone():
+            return jsonify({'error': 'Customer not found'}), 404
+        try:
+            conn.execute(
+                'INSERT INTO user_customers (user_id, custname) VALUES (?, ?)', (user_id, custname)
+            )
+        except sqlite3.IntegrityError:
+            pass  # Already assigned
+    return jsonify({'ok': True})
+
+
+@app.delete('/api/users/<int:user_id>/customers/<custname>')
+@require_auth
+@require_admin
+def unassign_customer_from_user(user_id, custname):
+    with get_db() as conn:
+        conn.execute(
+            'DELETE FROM user_customers WHERE user_id = ? AND custname = ?',
+            (user_id, custname.upper())
+        )
+    return jsonify({'ok': True})
+
+
 # ── SPA fallback ───────────────────────────────────────────────────────────
 
 @app.route('/', defaults={'path': ''})
 @app.route('/<path:path>')
 def serve_spa(path):
-    # Serve static assets (js/, css/) directly; everything else → index.html
     if path and os.path.exists(os.path.join(app.static_folder, path)):
         return send_from_directory(app.static_folder, path)
     return send_from_directory(app.static_folder, 'index.html')

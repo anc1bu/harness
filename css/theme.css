@@ -161,6 +161,13 @@ tbody tr.selected td { background: rgba(74,222,128,0.10); color: var(--accent2);
 }
 .empty-state .es-icon { font-size: 42px; opacity: .3; }
 
+/* ── Customer badge ── */
+.cust-badge {
+  font-size: 10px; letter-spacing: 1.5px; color: var(--accent2);
+  padding: 3px 8px; border: 1px solid var(--border); border-radius: 3px;
+  text-transform: uppercase; white-space: nowrap;
+}
+
 /* ── Login view ── */
 #login-view {
   flex: 1; display: flex; align-items: center; justify-content: center;
