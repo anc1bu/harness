@@ -38,10 +38,13 @@ async function _render() {
     return;
   }
 
-  // Authenticated but no customer selected — only admin pages are accessible
+  // Authenticated but no customer selected — only admin pages are accessible (admins can bypass)
   if (isAuthenticated() && !localStorage.getItem('custname') && !ADMIN_ROUTES.has(hash)) {
-    navigate('#/admin');
-    return;
+    const user = getState('user');
+    if (!user?.is_admin) {
+      navigate('#/admin');
+      return;
+    }
   }
 
   if (ADMIN_ROUTES.has(hash)) {

@@ -15,6 +15,13 @@ from functools import wraps
 from io import BytesIO
 from flask import Flask, request, jsonify, send_from_directory
 import openpyxl
+from collections import namedtuple
+
+# Structured validation result: code ('V1'…'V9','V-Show-2'), human error string, field list
+_ValResult = namedtuple('_ValResult', ['code', 'error', 'fields'])
+# fields: list of {'name': str, 'note': str|None}  (note = 'extra'|'missing' for column checks)
+
+_EXCEPTION_VALIDATIONS = frozenset({'V4', 'V5', 'V9', 'V-Show-2'})
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 DB_PATH = os.path.join(os.path.dirname(__file__), 'db', 'harness.db')
@@ -30,7 +37,7 @@ def _determine_table_type(name):
     if upper == 'DD03L':
         return 'master'
     if upper.startswith('DD'):
-        return 'configuration'
+        return 'basis'
     return 'customizing'
 
 
@@ -42,9 +49,11 @@ def _validate_headers_technical(headers, table_name, table_type):
     descriptive = [h for h in headers if ' ' in h]
     if descriptive:
         sample = ', '.join(f'"{h}"' for h in descriptive[:5])
-        return (
-            f'[V1]{t} {table_name}: column headers must be technical field names, not descriptions. '
-            f'Descriptive headers found: {sample}'
+        return _ValResult(
+            code='V1',
+            error=(f'[V1]{t} {table_name}: column headers must be technical field names, not descriptions. '
+                   f'Descriptive headers found: {sample}'),
+            fields=[{'name': h, 'note': None} for h in descriptive],
         )
     return None
 
@@ -56,7 +65,11 @@ def _validate_master(table_name, headers, data_rows, table_type, dd03l_db_name):
     # V2: TABNAME and FIELDNAME columns must exist
     missing_cols = [c for c in ('TABNAME', 'FIELDNAME') if c not in headers]
     if missing_cols:
-        return f'[V2]{t} {table_name}: missing required columns: {", ".join(missing_cols)}'
+        return _ValResult(
+            code='V2',
+            error=f'[V2]{t} {table_name}: missing required columns: {", ".join(missing_cols)}',
+            fields=[{'name': c, 'note': None} for c in missing_cols],
+        )
 
     tabname_idx = headers.index('TABNAME')
 
@@ -69,9 +82,11 @@ def _validate_master(table_name, headers, data_rows, table_type, dd03l_db_name):
     if 'DD03L' in all_tabnames and len(all_tabnames) > 1:
         others = sorted(all_tabnames - {'DD03L'})
         sample = ', '.join(others[:5]) + (' …' if len(others) > 5 else '')
-        return (
-            f'[V3]{t} {table_name}: DD03L cannot be mixed with other table names in the TABNAME column. '
-            f'Please upload a file that contains only DD03L entries. Found other values: {sample}'
+        return _ValResult(
+            code='V3',
+            error=(f'[V3]{t} {table_name}: DD03L cannot be mixed with other table names in the TABNAME column. '
+                   f'Please upload a file that contains only DD03L entries. Found other values: {sample}'),
+            fields=[{'name': o, 'note': None} for o in others],
         )
 
     # V4: only if all TABNAME values equal DD03L — Excel columns must match FIELDNAME values
@@ -85,13 +100,17 @@ def _validate_master(table_name, headers, data_rows, table_type, dd03l_db_name):
             and (rollname_idx is None or (r[rollname_idx] is not None and str(r[rollname_idx]).strip() != ''))
         }
         headers_set = set(headers)
-        if headers_set != fieldname_vals:
-            extra   = sorted(headers_set - fieldname_vals)
-            missing = sorted(fieldname_vals - headers_set)
+        extra   = sorted(headers_set - fieldname_vals)
+        missing = sorted(fieldname_vals - headers_set)
+        if extra or missing:
             parts = []
             if extra:   parts.append(f'extra columns: {", ".join(extra)}')
             if missing: parts.append(f'missing columns: {", ".join(missing)}')
-            return f'[V4]{t} {table_name}: the uploaded file columns do not match the expected field definitions. {"; ".join(parts)}'
+            return _ValResult(
+                code='V4',
+                error=f'[V4]{t} {table_name}: the uploaded file columns do not match the expected field definitions. {"; ".join(parts)}',
+                fields=[{'name': f, 'note': 'extra'} for f in extra] + [{'name': f, 'note': 'missing'} for f in missing],
+            )
 
     # V5: only if TABNAME values are not DD03L — Excel columns must match DD03L field definitions
     if 'DD03L' not in all_tabnames:
@@ -102,13 +121,17 @@ def _validate_master(table_name, headers, data_rows, table_type, dd03l_db_name):
             ).fetchall()
             fieldname_vals = {r[0].strip() for r in rows if r[0] is not None}
             headers_set = set(headers)
-            if headers_set != fieldname_vals:
-                extra   = sorted(headers_set - fieldname_vals)
-                missing = sorted(fieldname_vals - headers_set)
+            extra   = sorted(headers_set - fieldname_vals)
+            missing = sorted(fieldname_vals - headers_set)
+            if extra or missing:
                 parts = []
                 if extra:   parts.append(f'extra columns: {", ".join(extra)}')
                 if missing: parts.append(f'missing columns: {", ".join(missing)}')
-                return f'[V5]{t} {table_name}: columns do not match DD03L field definitions. {"; ".join(parts)}'
+                return _ValResult(
+                    code='V5',
+                    error=f'[V5]{t} {table_name}: columns do not match DD03L field definitions. {"; ".join(parts)}',
+                    fields=[{'name': f, 'note': 'extra'} for f in extra] + [{'name': f, 'note': 'missing'} for f in missing],
+                )
 
     return None
 
@@ -123,15 +146,21 @@ def _validate_dd_headers(table_name, headers, table_type, dd03l_db_name, check_v
         ).fetchone()
         dd03l_count = conn.execute(f'SELECT COUNT(*) FROM "{dd03l_db_name}"').fetchone()[0] if dd03l_exists else 0
         if not dd03l_exists or dd03l_count == 0:
-            return f'[V6]{t} DD03L master table is not loaded. Upload DD03L before uploading {table_type} tables.'
+            return _ValResult(
+                code='V6',
+                error=f'[V6]{t} DD03L master table is not loaded. Upload DD03L before uploading {table_type} tables.',
+                fields=[],
+            )
 
         master_count = conn.execute(
             f'SELECT COUNT(*) FROM "{dd03l_db_name}" WHERE TABNAME = \'DD03L\''
         ).fetchone()[0]
         if master_count < 30:
-            return (
-                f'[V7]{t} DD03L master data is incomplete ({master_count} rows where TABNAME="DD03L", '
-                f'need at least 30). Upload a complete DD03L file first.'
+            return _ValResult(
+                code='V7',
+                error=(f'[V7]{t} DD03L master data is incomplete ({master_count} rows where TABNAME="DD03L", '
+                       f'need at least 30). Upload a complete DD03L file first.'),
+                fields=[],
             )
 
         if check_v8:
@@ -139,7 +168,11 @@ def _validate_dd_headers(table_name, headers, table_type, dd03l_db_name, check_v
                 f'SELECT 1 FROM "{dd03l_db_name}" WHERE TABNAME = ?', (table_name.upper(),)
             ).fetchone()
             if not exists_in_dd03l:
-                return f'[V8]{t} no entries in master table (DD03L) for {table_name}.'
+                return _ValResult(
+                    code='V8',
+                    error=f'[V8]{t} no entries in master table (DD03L) for {table_name}.',
+                    fields=[],
+                )
 
         rows = conn.execute(
             f'SELECT FIELDNAME FROM "{dd03l_db_name}" WHERE TABNAME = ? AND ROLLNAME IS NOT NULL AND ROLLNAME != \'\'',
@@ -155,13 +188,47 @@ def _validate_dd_headers(table_name, headers, table_type, dd03l_db_name, check_v
             parts = []
             if extra:   parts.append(f'extra in Excel: {", ".join(extra[:5])}{"  …" if len(extra) > 5 else ""}')
             if missing: parts.append(f'missing from Excel: {", ".join(missing[:5])}{"  …" if len(missing) > 5 else ""}')
-            return f'[V9]{t} {table_name}: Excel headers do not match DD03L field definitions. {"; ".join(parts)}'
+            return _ValResult(
+                code='V9',
+                error=f'[V9]{t} {table_name}: Excel headers do not match DD03L field definitions. {"; ".join(parts)}',
+                fields=[{'name': f, 'note': 'extra'} for f in extra] + [{'name': f, 'note': 'missing'} for f in missing],
+            )
 
     return None
 
 
-def _validate_configuration(table_name, headers, data_rows, table_type, dd03l_db_name):
+def _validate_basis(table_name, headers, data_rows, table_type, dd03l_db_name):
     return _validate_dd_headers(table_name, headers, table_type, dd03l_db_name, check_v8=True)
+
+
+# ── Validation log / exception helpers ────────────────────────────────────
+
+def _get_exceptions(conn, custname, validation, table_name):
+    """Return set of field names excepted for a given validation + table."""
+    rows = conn.execute(
+        'SELECT field_name FROM validation_exceptions WHERE custname=? AND validation=? AND table_name=?',
+        (custname, validation, table_name.upper())
+    ).fetchall()
+    return {r[0] for r in rows}
+
+
+def _log_val_fields(conn, custname, validation, table_name, fields):
+    """Log validation violation fields. fields is a list of dicts or strings."""
+    if fields:
+        for f in fields:
+            name = f['name'] if isinstance(f, dict) else f
+            note = f.get('note') if isinstance(f, dict) else None
+            conn.execute(
+                'INSERT INTO validation_logs (custname, validation, table_name, field_name, note) '
+                'VALUES (?,?,?,?,?)',
+                (custname, validation, table_name.upper(), name, note)
+            )
+    else:
+        conn.execute(
+            'INSERT INTO validation_logs (custname, validation, table_name, field_name, note) '
+            'VALUES (?,?,?,?,?)',
+            (custname, validation, table_name.upper(), None, None)
+        )
 
 
 # ── Database helpers ───────────────────────────────────────────────────────
@@ -215,6 +282,24 @@ def init_db():
             user_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             custname TEXT NOT NULL REFERENCES customers(custname) ON DELETE CASCADE,
             PRIMARY KEY (user_id, custname)
+        );
+        CREATE TABLE IF NOT EXISTS validation_logs (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            custname     TEXT NOT NULL,
+            validation   TEXT NOT NULL,
+            table_name   TEXT NOT NULL,
+            field_name   TEXT,
+            note         TEXT,
+            triggered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE TABLE IF NOT EXISTS validation_exceptions (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            custname   TEXT NOT NULL,
+            validation TEXT NOT NULL,
+            table_name TEXT NOT NULL,
+            field_name TEXT NOT NULL,
+            added_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(custname, validation, table_name, field_name)
         );
     ''')
 
@@ -486,17 +571,38 @@ def upload_excel():
     table_type = _determine_table_type(table_name)
 
     # ── Step 2: V1 — technical headers check (all table types) ───────────────
-    err = _validate_headers_technical(headers, table_name, table_type)
-    if err:
-        return jsonify({'error': err}), 422
+    vr = _validate_headers_technical(headers, table_name, table_type)
+    if vr:
+        with get_db() as conn:
+            _log_val_fields(conn, custname, vr.code, table_name, vr.fields)
+        return jsonify({'error': vr.error}), 422
 
     # ── Step 3: Run type-specific validations ─────────────────────────────────
     if table_type == 'master':
-        err = _validate_master(table_name, headers, data_rows, table_type, dd03l_db_name)
+        vr = _validate_master(table_name, headers, data_rows, table_type, dd03l_db_name)
     else:
-        err = _validate_configuration(table_name, headers, data_rows, table_type, dd03l_db_name)
-    if err:
-        return jsonify({'error': err}), 422
+        vr = _validate_basis(table_name, headers, data_rows, table_type, dd03l_db_name)
+    if vr:
+        with get_db() as conn:
+            _log_val_fields(conn, custname, vr.code, table_name, vr.fields)
+            if vr.code in _EXCEPTION_VALIDATIONS:
+                exceptions = _get_exceptions(conn, custname, vr.code, table_name)
+                remaining  = [f for f in vr.fields if f['name'] not in exceptions]
+                if remaining:
+                    extra   = [f['name'] for f in remaining if f.get('note') == 'extra']
+                    missing = [f['name'] for f in remaining if f.get('note') == 'missing']
+                    t = f'[{table_type}]'
+                    parts = []
+                    if vr.code == 'V9':
+                        if extra:   parts.append(f'extra in Excel: {", ".join(extra[:5])}{"  …" if len(extra) > 5 else ""}')
+                        if missing: parts.append(f'missing from Excel: {", ".join(missing[:5])}{"  …" if len(missing) > 5 else ""}')
+                    else:
+                        if extra:   parts.append(f'extra columns: {", ".join(extra[:5])}{"  …" if len(extra) > 5 else ""}')
+                        if missing: parts.append(f'missing columns: {", ".join(missing[:5])}{"  …" if len(missing) > 5 else ""}')
+                    return jsonify({'error': f'[{vr.code}]{t} {table_name}: {"; ".join(parts)}'}), 422
+                # all fields excepted — fall through and proceed with upload
+            else:
+                return jsonify({'error': vr.error}), 422
 
     # ── Step 4: Determine key fields ──────────────────────────────────────────
     key_fields = set()
@@ -608,12 +714,17 @@ def get_table_data(table):
 
         # Build enriched headers
         enriched_cols = []
-        missing_fields = []
+        all_missing   = []   # every field without a description (for logging)
+        missing_fields = []  # non-excepted missing fields (returned to frontend)
         partial_descriptions = False
 
         dd03l_exists = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (dd03l_name,)
         ).fetchone()
+
+        vshow2_exceptions = set()
+        if not dd04t_missing:
+            vshow2_exceptions = _get_exceptions(conn, custname, 'V-Show-2', orig_table)
 
         for col in raw_cols:
             if dd04t_missing:
@@ -630,8 +741,10 @@ def get_table_data(table):
 
             if not rollname_row or not rollname_row['ROLLNAME']:
                 enriched_cols.append(col)
-                missing_fields.append(col)
-                partial_descriptions = True
+                all_missing.append(col)
+                if col not in vshow2_exceptions:
+                    missing_fields.append(col)
+                    partial_descriptions = True
                 continue
 
             rollname = rollname_row['ROLLNAME'].strip()
@@ -644,10 +757,16 @@ def get_table_data(table):
 
             if not desc_row or not desc_row['SCRTEXT_M']:
                 enriched_cols.append(col)
-                missing_fields.append(col)
-                partial_descriptions = True
+                all_missing.append(col)
+                if col not in vshow2_exceptions:
+                    missing_fields.append(col)
+                    partial_descriptions = True
             else:
                 enriched_cols.append(f'{col} - {desc_row["SCRTEXT_M"].strip()}')
+
+        # Log V-Show-2 violations (all missing, regardless of exceptions)
+        if all_missing:
+            _log_val_fields(conn, custname, 'V-Show-2', orig_table, all_missing)
 
         rows_out = [dict(zip(enriched_cols, [row[c] for c in raw_cols])) for row in raw_rows]
 
@@ -802,6 +921,89 @@ def unassign_customer_from_user(user_id, custname):
             'DELETE FROM user_customers WHERE user_id = ? AND custname = ?',
             (user_id, custname.upper())
         )
+    return jsonify({'ok': True})
+
+
+# ── Validation log & exception routes ─────────────────────────────────────
+
+@app.get('/api/validation-logs')
+@require_auth
+@require_admin
+def list_validation_logs():
+    custname = _session_custname()
+    with get_db() as conn:
+        rows = conn.execute(
+            '''SELECT vl.id, vl.validation, vl.table_name, vl.field_name, vl.note, vl.triggered_at,
+                      CASE WHEN ve.id IS NOT NULL THEN 1 ELSE 0 END AS is_excepted
+               FROM validation_logs vl
+               LEFT JOIN validation_exceptions ve
+                  ON ve.custname   = vl.custname
+                 AND ve.validation = vl.validation
+                 AND ve.table_name = vl.table_name
+                 AND ve.field_name = vl.field_name
+               WHERE vl.custname = ?
+               ORDER BY vl.triggered_at DESC
+               LIMIT 500''',
+            (custname,)
+        ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.get('/api/validation-exceptions')
+@require_auth
+@require_admin
+def list_validation_exceptions():
+    custname = _session_custname()
+    with get_db() as conn:
+        rows = conn.execute(
+            'SELECT id, validation, table_name, field_name, added_at '
+            'FROM validation_exceptions WHERE custname=? ORDER BY added_at DESC',
+            (custname,)
+        ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.post('/api/validation-exceptions')
+@require_auth
+@require_admin
+def add_validation_exception():
+    custname = _session_custname()
+    data = request.json or {}
+    validation = data.get('validation', '').strip()
+    table_name = data.get('table_name', '').strip().upper()
+    field_name = data.get('field_name', '').strip()
+    if not validation or not table_name or not field_name:
+        return jsonify({'error': 'validation, table_name and field_name are required'}), 400
+    if validation not in _EXCEPTION_VALIDATIONS:
+        return jsonify({'error': f'Exceptions not supported for {validation}'}), 400
+    with get_db() as conn:
+        try:
+            conn.execute(
+                'INSERT INTO validation_exceptions (custname, validation, table_name, field_name) VALUES (?,?,?,?)',
+                (custname, validation, table_name, field_name)
+            )
+            row_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
+        except sqlite3.IntegrityError:
+            row = conn.execute(
+                'SELECT id FROM validation_exceptions WHERE custname=? AND validation=? AND table_name=? AND field_name=?',
+                (custname, validation, table_name, field_name)
+            ).fetchone()
+            row_id = row['id']
+    return jsonify({'ok': True, 'id': row_id}), 201
+
+
+@app.delete('/api/validation-exceptions/<int:exc_id>')
+@require_auth
+@require_admin
+def delete_validation_exception(exc_id):
+    custname = _session_custname()
+    with get_db() as conn:
+        exists = conn.execute(
+            'SELECT 1 FROM validation_exceptions WHERE id=? AND custname=?', (exc_id, custname)
+        ).fetchone()
+        if not exists:
+            return jsonify({'error': 'Exception not found'}), 404
+        conn.execute('DELETE FROM validation_exceptions WHERE id=?', (exc_id,))
     return jsonify({'ok': True})
 
 

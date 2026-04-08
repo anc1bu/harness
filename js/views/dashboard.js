@@ -6,6 +6,7 @@ import { navigate } from '../router.js';
 import { getState, subscribe, unsubscribe } from '../state.js';
 import { toast } from '../components/modal.js';
 import { renderTable } from '../components/table.js';
+import { avatarDropdownHtml, initAvatarDropdown } from '../components/avatar.js';
 
 
 // ── General validation ─────────────────────────────────────────────────────
@@ -17,7 +18,7 @@ const _MASTER_TABLES = new Set(['DD03L']);
 function _classifyTable(name) {
   const upper = name.toUpperCase();
   if (_MASTER_TABLES.has(upper)) return 'master';
-  if (upper.startsWith('DD')) return 'configuration';
+  if (upper.startsWith('DD')) return 'basis';
   return 'customizing';
 }
 
@@ -31,20 +32,14 @@ export function mount(container) {
   const user     = getState('user');
   const customer = getState('customer');
 
-  if (user?.is_admin) {
-    const adminBtn = container.querySelector('#btn-admin');
-    adminBtn.style.display = '';
-    adminBtn.addEventListener('click', () => navigate('#/admin'));
-  }
-
   const custLabel = container.querySelector('#customer-badge');
   if (customer) custLabel.textContent = `${customer.custname} — ${customer.name}`;
 
-  container.querySelector('#btn-logout').addEventListener('click', async () => {
-    await logout();
-    navigate('#/login');
-  });
-  container.querySelector('#btn-settings').addEventListener('click', () => navigate('#/settings'));
+  const menuItems = [
+    ...(user?.is_admin ? [{ label: 'Admin Page', action: () => navigate('#/admin') }] : []),
+    { label: 'Logout', action: async () => { await logout(); navigate('#/login'); }, danger: true },
+  ];
+  initAvatarDropdown(container, menuItems);
 
   const onRowsChange = (rows) => _refreshDataTable(container, rows);
   subscribe('rows', onRowsChange);
@@ -90,11 +85,7 @@ function _html() {
       <div style="display:flex;align-items:center;gap:16px">
         <div class="cust-badge" id="customer-badge"></div>
         <div class="clock" id="clock">--:--:--</div>
-        <div class="topbar-nav">
-          <button class="btn inline" id="btn-admin" style="display:none">Admin</button>
-          <button class="btn inline" id="btn-settings">Settings</button>
-          <button class="btn inline danger" id="btn-logout">Logout</button>
-        </div>
+        ${avatarDropdownHtml()}
       </div>
     </div>
     <div id="layout">
@@ -109,8 +100,8 @@ function _html() {
           </div>
           <div class="upload-status" id="upload-status"></div>
 
-          ${_tableSection('config-tables-wrap', 'Configuration Tables', 'config-meta-tbody')}
           ${_tableSection('custom-tables-wrap', 'Customizing Tables', 'custom-meta-tbody')}
+          ${_tableSection('basis-tables-wrap', 'Basis Tables', 'basis-meta-tbody')}
 
         </div>
       </div>
@@ -125,7 +116,7 @@ function _html() {
             <div class="es-icon" style="font-size:24px">▤</div>
             <div>No data loaded</div>
           </div>
-          <div id="table-wrap" style="display:none;height:100%;overflow:auto;"></div>
+          <div id="table-wrap" style="display:none;"></div>
         </div>
       </div>
 
@@ -166,22 +157,18 @@ async function _loadTablesMeta(container) {
 }
 
 function _renderTablesMeta(container, tables) {
-  const configTbody = container.querySelector('#config-meta-tbody');
+  const basisTbody  = container.querySelector('#basis-meta-tbody');
   const customTbody = container.querySelector('#custom-meta-tbody');
 
-  const configTables = tables.filter(t => ['master', 'configuration'].includes(_classifyTable(t.orig_table)));
-  const customTables  = tables.filter(t => _classifyTable(t.orig_table) === 'customizing');
+  const basisTables  = tables.filter(t => ['master', 'basis'].includes(_classifyTable(t.orig_table)));
+  const customTables = tables.filter(t => _classifyTable(t.orig_table) === 'customizing');
 
-  _fillTbody(configTbody, configTables, 'No configuration tables', container);
+  _fillBasisTbody(basisTbody, basisTables, container);
   _fillTbody(customTbody, customTables, 'No customizing tables', container);
 }
 
-function _fillTbody(tbody, tables, emptyMsg, container) {
-  if (!tables.length) {
-    tbody.innerHTML = `<tr><td colspan="6" class="meta-empty">${emptyMsg}</td></tr>`;
-    return;
-  }
-  tbody.innerHTML = tables.map(t => `
+function _rowHtml(t) {
+  return `
     <tr class="mt-row" data-table="${t.table}" data-orig-table="${t.orig_table}" style="cursor:pointer;">
       <td class="mt-name">${t.orig_table}</td>
       <td>${t.system}</td>
@@ -190,18 +177,47 @@ function _fillTbody(tbody, tables, emptyMsg, container) {
       <td>${t.count}</td>
       <td><button class="btn danger mt-del" data-table="${t.table}" style="padding:2px 8px;font-size:10px;">DELETE</button></td>
     </tr>
-  `).join('');
+  `;
+}
 
+function _bindTbody(tbody, container) {
   tbody.querySelectorAll('.mt-del').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       _deleteTable(container, btn.dataset.table);
     });
   });
-
   tbody.querySelectorAll('.mt-row').forEach(row => {
     row.addEventListener('click', () => _loadTableData(container, row.dataset.table, row.dataset.origTable));
   });
+}
+
+function _fillBasisTbody(tbody, tables, container) {
+  const hasDd03l = tables.some(t => t.orig_table.toUpperCase() === 'DD03L');
+  let html = tables.map(_rowHtml).join('');
+  if (!hasDd03l) {
+    html += `
+      <tr class="mt-dd03l-placeholder">
+        <td class="mt-name" style="color:var(--text-dim)">DD03L</td>
+        <td style="color:var(--text-dim)">—</td>
+        <td style="color:var(--text-dim)">—</td>
+        <td style="color:var(--text-dim)">—</td>
+        <td style="color:var(--text-dim)">—</td>
+        <td style="color:var(--text-dim);font-size:10px;letter-spacing:1px;">NOT UPLOADED</td>
+      </tr>
+    `;
+  }
+  tbody.innerHTML = html;
+  _bindTbody(tbody, container);
+}
+
+function _fillTbody(tbody, tables, emptyMsg, container) {
+  if (!tables.length) {
+    tbody.innerHTML = `<tr><td colspan="6" class="meta-empty">${emptyMsg}</td></tr>`;
+    return;
+  }
+  tbody.innerHTML = tables.map(_rowHtml).join('');
+  _bindTbody(tbody, container);
 }
 
 async function _deleteTable(container, table) {
@@ -279,12 +295,14 @@ async function _handleFile(file, container, statusEl) {
 
 function _injectPendingRow(container, tableName, system, client, date) {
   const type    = _classifyTable(tableName);
-  const tbodyId = type === 'customizing' ? 'custom-meta-tbody' : 'config-meta-tbody';
+  const tbodyId = type === 'customizing' ? 'custom-meta-tbody' : 'basis-meta-tbody';
   const tbody   = container.querySelector(`#${tbodyId}`);
 
-  // Remove empty placeholder if present
+  // Remove empty placeholder or DD03L placeholder if present
   const emptyRow = tbody.querySelector('.meta-empty');
   if (emptyRow) emptyRow.closest('tr').remove();
+  const dd03lPlaceholder = tbody.querySelector('.mt-dd03l-placeholder');
+  if (dd03lPlaceholder) dd03lPlaceholder.remove();
 
   // Remove any existing pending row for this table
   const existing = tbody.querySelector(`tr[data-pending="${tableName}"]`);
