@@ -115,6 +115,12 @@ def _validate_master(table_name, headers, data_rows, table_type, dd03l_db_name):
     # V5: only if TABNAME values are not DD03L — Excel columns must match DD03L field definitions
     if 'DD03L' not in all_tabnames:
         with get_db() as conn:
+            dd03l_exists = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (dd03l_db_name,)
+            ).fetchone()
+            if not dd03l_exists:
+                return None  # No DD03L table yet — skip V5, allow upload
             rows = conn.execute(
                 f'SELECT FIELDNAME FROM "{dd03l_db_name}" WHERE TABNAME = ? AND ROLLNAME IS NOT NULL AND ROLLNAME != \'\'',
                 (table_name.upper(),)
