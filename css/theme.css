@@ -246,3 +246,18 @@ tbody tr.selected td { background: rgba(74,222,128,0.10); color: var(--accent2);
 .meta-table tr:hover td { background: rgba(74,222,128,0.04); }
 .meta-table .mt-name { color: var(--accent2); font-weight: 600; }
 .meta-empty { text-align: center; color: var(--text-dim); padding: 16px; }
+
+/* ── Upload progress bar ────────────────────────────────────────────────── */
+.upload-progress {
+  width: 64px; height: 3px; background: var(--border);
+  border-radius: 2px; overflow: hidden;
+}
+.upload-progress-fill {
+  height: 100%; width: 40%; background: var(--accent);
+  border-radius: 2px;
+  animation: progress-slide 1s ease-in-out infinite;
+}
+@keyframes progress-slide {
+  0%   { transform: translateX(-200%); }
+  100% { transform: translateX(400%); }
+}

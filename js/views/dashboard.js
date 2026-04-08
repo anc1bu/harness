@@ -115,6 +115,20 @@ function _html() {
         </div>
       </div>
 
+      <div class="panel" id="panel-table">
+        <div class="panel-header" style="justify-content:space-between;">
+          <div style="display:flex;align-items:center;gap:8px;"><div class="ph-dot"></div>DATA TABLE</div>
+          <span id="table-name-label" style="color:var(--accent2);font-size:10px;letter-spacing:2px;"></span>
+        </div>
+        <div class="panel-body" style="padding:0;">
+          <div class="empty-state" id="table-empty" style="height:100%">
+            <div class="es-icon" style="font-size:24px">▤</div>
+            <div>No data loaded</div>
+          </div>
+          <div id="table-wrap" style="display:none;height:100%;overflow:auto;"></div>
+        </div>
+      </div>
+
       <div class="panel" id="panel-graph">
         <div class="panel-header"><div class="ph-dot"></div>RELATIONSHIP GRAPH</div>
         <div class="panel-body" style="padding:0;position:relative;">
@@ -123,17 +137,6 @@ function _html() {
             <div>Upload a table to begin</div>
           </div>
           <svg id="graph-svg" style="display:none"></svg>
-        </div>
-      </div>
-
-      <div class="panel" id="panel-table">
-        <div class="panel-header"><div class="ph-dot"></div>DATA TABLE</div>
-        <div class="panel-body" style="padding:0;">
-          <div class="empty-state" id="table-empty" style="height:100%">
-            <div class="es-icon" style="font-size:24px">▤</div>
-            <div>No data loaded</div>
-          </div>
-          <div id="table-wrap" style="display:none;height:100%;overflow:auto;"></div>
         </div>
       </div>
     </div>
@@ -179,7 +182,7 @@ function _fillTbody(tbody, tables, emptyMsg, container) {
     return;
   }
   tbody.innerHTML = tables.map(t => `
-    <tr>
+    <tr class="mt-row" data-table="${t.table}" data-orig-table="${t.orig_table}" style="cursor:pointer;">
       <td class="mt-name">${t.orig_table}</td>
       <td>${t.system}</td>
       <td>${t.client}</td>
@@ -190,7 +193,14 @@ function _fillTbody(tbody, tables, emptyMsg, container) {
   `).join('');
 
   tbody.querySelectorAll('.mt-del').forEach(btn => {
-    btn.addEventListener('click', () => _deleteTable(container, btn.dataset.table));
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      _deleteTable(container, btn.dataset.table);
+    });
+  });
+
+  tbody.querySelectorAll('.mt-row').forEach(row => {
+    row.addEventListener('click', () => _loadTableData(container, row.dataset.table, row.dataset.origTable));
   });
 }
 
@@ -243,6 +253,11 @@ async function _handleFile(file, container, statusEl) {
     return;
   }
 
+  const [, tableName, system, client, date] = _FILENAME_RE.exec(file.name);
+
+  // Show pending row immediately
+  _injectPendingRow(container, tableName, system, client, date);
+
   statusEl.textContent = `Uploading ${file.name}…`;
   statusEl.className = 'upload-status';
 
@@ -256,9 +271,36 @@ async function _handleFile(file, container, statusEl) {
     document.addEventListener('click', () => { statusEl.textContent = ''; statusEl.className = 'upload-status'; }, { once: true });
     await _loadTablesMeta(container);
   } catch (err) {
+    await _loadTablesMeta(container);
     statusEl.textContent = '';
     toast(`Upload failed: ${err.message}`, 'err');
   }
+}
+
+function _injectPendingRow(container, tableName, system, client, date) {
+  const type    = _classifyTable(tableName);
+  const tbodyId = type === 'customizing' ? 'custom-meta-tbody' : 'config-meta-tbody';
+  const tbody   = container.querySelector(`#${tbodyId}`);
+
+  // Remove empty placeholder if present
+  const emptyRow = tbody.querySelector('.meta-empty');
+  if (emptyRow) emptyRow.closest('tr').remove();
+
+  // Remove any existing pending row for this table
+  const existing = tbody.querySelector(`tr[data-pending="${tableName}"]`);
+  if (existing) existing.remove();
+
+  const tr = document.createElement('tr');
+  tr.dataset.pending = tableName;
+  tr.innerHTML = `
+    <td class="mt-name">${tableName}</td>
+    <td>${system}</td>
+    <td>${client}</td>
+    <td>${date}</td>
+    <td style="color:var(--text-dim)">—</td>
+    <td><div class="upload-progress"><div class="upload-progress-fill"></div></div></td>
+  `;
+  tbody.appendChild(tr);
 }
 
 // ── Right panel data table ─────────────────────────────────────────────────
@@ -274,4 +316,44 @@ function _refreshDataTable(container, rows) {
   emptyEl.style.display = 'none';
   wrapEl.style.display = '';
   renderTable(wrapEl, { rows, columns: getState('columns') });
+}
+
+// ── Table Show Validations ─────────────────────────────────────────────────
+
+async function _loadTableData(container, table, origTable) {
+  const emptyEl   = container.querySelector('#table-empty');
+  const wrapEl    = container.querySelector('#table-wrap');
+  const nameLabel = container.querySelector('#table-name-label');
+
+  try {
+    const data = await api.get(`/api/tables/${encodeURIComponent(table)}/data`);
+
+    // V-Show-1: DD04T missing or empty → error, do not show
+    if (data.dd04t_missing) {
+      toast('pls upload DD04T table with English language', 'err');
+      return;
+    }
+
+    // V-Show-2: DD04T exists but some descriptions missing → warning, still show
+    if (data.partial_descriptions) {
+      const fields  = (data.missing_fields || []).slice(0, 5);
+      const more    = (data.missing_fields || []).length > 5 ? ` (+${data.missing_fields.length - 5} more)` : '';
+      const fieldList = fields.length ? `\nMissing: ${fields.join(', ')}${more}` : '';
+      toast(`Some of the descriptions are missing, pls update DD04T${fieldList}`, 'warn');
+    }
+
+    if (nameLabel) nameLabel.textContent = origTable || '';
+
+    if (!data.rows || !data.rows.length) {
+      emptyEl.style.display = '';
+      wrapEl.style.display = 'none';
+      return;
+    }
+
+    emptyEl.style.display = 'none';
+    wrapEl.style.display = '';
+    renderTable(wrapEl, { rows: data.rows, columns: data.columns });
+  } catch (err) {
+    toast(`Failed to load table data: ${err.message}`, 'err');
+  }
 }

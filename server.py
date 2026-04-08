@@ -548,12 +548,115 @@ def upload_excel():
         )
         rows_inserted = len(all_values)
 
+        # Sort DD03L by TABNAME, POSITION after every insert
+        if table_name.upper() == 'DD03L' and 'TABNAME' in headers and 'POSITION' in headers:
+            tmp = db_table_name + '__sorted_tmp'
+            conn.execute(f'DROP TABLE IF EXISTS "{tmp}"')
+            conn.execute(
+                f'CREATE TABLE "{tmp}" AS '
+                f'SELECT * FROM "{db_table_name}" '
+                f'ORDER BY TABNAME ASC, CAST(POSITION AS INTEGER) ASC'
+            )
+            conn.execute(f'DROP TABLE "{db_table_name}"')
+            conn.execute(f'ALTER TABLE "{tmp}" RENAME TO "{db_table_name}"')
+
     return jsonify({
         'ok': True,
         'table': db_table_name,
         'orig_table': table_name,
         'table_type': table_type,
         'rows_inserted': rows_inserted,
+    })
+
+
+# ── Table data route ───────────────────────────────────────────────────────
+
+@app.get('/api/tables/<table>/data')
+@require_auth
+def get_table_data(table):
+    custname = _session_custname()
+    with get_db() as conn:
+        meta = conn.execute(
+            'SELECT orig_table, system FROM _table_meta WHERE table_name = ? AND custname = ?',
+            (table, custname)
+        ).fetchone()
+        if not meta:
+            return jsonify({'error': 'Table not found'}), 404
+
+        orig_table = meta['orig_table'] or table
+        system     = meta['system']
+        dd03l_name = f'{custname}_{system}_DD03L'
+        dd04t_name = f'{custname}_{system}_DD04T'
+
+        # Fetch raw rows
+        try:
+            raw_rows = conn.execute(f'SELECT * FROM "{table}"').fetchall()
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+        if not raw_rows:
+            return jsonify({'columns': [], 'rows': [], 'dd04t_missing': False, 'partial_descriptions': False})
+
+        raw_cols = list(raw_rows[0].keys())
+
+        # Check DD04T existence and records
+        dd04t_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (dd04t_name,)
+        ).fetchone()
+        dd04t_count = conn.execute(f'SELECT COUNT(*) FROM "{dd04t_name}"').fetchone()[0] if dd04t_exists else 0
+        dd04t_missing = not dd04t_exists or dd04t_count == 0
+
+        # Build enriched headers
+        enriched_cols = []
+        missing_fields = []
+        partial_descriptions = False
+
+        dd03l_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (dd03l_name,)
+        ).fetchone()
+
+        for col in raw_cols:
+            if dd04t_missing:
+                enriched_cols.append(col)
+                continue
+
+            # Look up ROLLNAME from DD03L
+            rollname_row = None
+            if dd03l_exists:
+                rollname_row = conn.execute(
+                    f'SELECT ROLLNAME FROM "{dd03l_name}" WHERE TABNAME = ? AND FIELDNAME = ?',
+                    (orig_table.upper(), col)
+                ).fetchone()
+
+            if not rollname_row or not rollname_row['ROLLNAME']:
+                enriched_cols.append(col)
+                missing_fields.append(col)
+                partial_descriptions = True
+                continue
+
+            rollname = rollname_row['ROLLNAME'].strip()
+
+            # Look up SCRTEXT_M from DD04T
+            desc_row = conn.execute(
+                f'SELECT SCRTEXT_M FROM "{dd04t_name}" WHERE ROLLNAME = ? AND DDLANGUAGE = ?',
+                (rollname, 'EN')
+            ).fetchone()
+
+            if not desc_row or not desc_row['SCRTEXT_M']:
+                enriched_cols.append(col)
+                missing_fields.append(col)
+                partial_descriptions = True
+            else:
+                enriched_cols.append(f'{col} - {desc_row["SCRTEXT_M"].strip()}')
+
+        rows_out = [dict(zip(enriched_cols, [row[c] for c in raw_cols])) for row in raw_rows]
+
+    return jsonify({
+        'columns': enriched_cols,
+        'rows': rows_out,
+        'dd04t_missing': dd04t_missing,
+        'partial_descriptions': partial_descriptions,
+        'missing_fields': missing_fields,
     })
 
 
