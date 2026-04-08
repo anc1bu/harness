@@ -151,16 +151,15 @@ def _validate_dd_headers(table_name, headers, table_type, dd03l_db_name, check_v
             (dd03l_db_name,)
         ).fetchone()
         dd03l_count = conn.execute(f'SELECT COUNT(*) FROM "{dd03l_db_name}"').fetchone()[0] if dd03l_exists else 0
-        if not dd03l_exists or dd03l_count == 0:
+        master_count = conn.execute(
+            f'SELECT COUNT(*) FROM "{dd03l_db_name}" WHERE TABNAME = \'DD03L\''
+        ).fetchone()[0] if dd03l_exists else 0
+        if not dd03l_exists or dd03l_count == 0 or master_count == 0:
             return _ValResult(
                 code='V6',
                 error=f'[V6]{t} DD03L master table is not loaded. Upload DD03L before uploading {table_type} tables.',
                 fields=[],
             )
-
-        master_count = conn.execute(
-            f'SELECT COUNT(*) FROM "{dd03l_db_name}" WHERE TABNAME = \'DD03L\''
-        ).fetchone()[0]
         if master_count < 30:
             return _ValResult(
                 code='V7',
