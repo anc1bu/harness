@@ -34,7 +34,7 @@ harness-dev/
 - **Components**: Export a factory or render function; never touch the DOM outside their own root element.
 - **State**: `state.js` is the single source of truth. Views subscribe to state slices; mutations go through state setters, never direct assignment.
 - **API**: All `fetch()` calls go through `api.js`. It attaches the auth token and normalizes errors.
-- **Routing**: Hash-based (`#/login`, `#/dashboard`, `#/settings`, `#/admin`). Unauthenticated requests redirect to `#/login`. Admin users without a customer selected are redirected to `#/admin`.
+- **Routing**: Hash-based (`#/login`, `#/dashboard`, `#/settings`, `#/admin`). Unauthenticated requests redirect to `#/login`. Non-admin users without a customer selected are redirected to `#/admin`. Admin users can access all routes regardless of customer selection.
 
 ### Backend (server.py)
 
@@ -55,11 +55,8 @@ System tables (`users`, `sessions`, `_table_meta`) are excluded from all user-ta
 python3 server.py      # http://localhost:5000 — default login: admin / admin
 ```
 
-## Workflow
+## Rules
 
 - Before doing any work, mention how you could verify that work.
-
-## Data & Storage
-
 - All data storage must use **SQLite** — no JSON files for data, regardless of size.
 - Test/debug Excel files go in `test-excel/`.
