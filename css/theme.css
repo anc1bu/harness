@@ -298,6 +298,7 @@ tbody tr.selected td { background: rgba(74,222,128,0.10); color: var(--accent2);
 
 /* ── Upload progress bar ────────────────────────────────────────────────── */
 .upload-progress {
+  flex-shrink: 0;
   width: 64px; height: 3px; background: var(--border);
   border-radius: 2px; overflow: hidden;
 }
@@ -305,6 +306,11 @@ tbody tr.selected td { background: rgba(74,222,128,0.10); color: var(--accent2);
   height: 100%; width: 40%; background: var(--accent);
   border-radius: 2px;
   animation: progress-slide 1s ease-in-out infinite;
+}
+.upload-progress-fill.determinate {
+  animation: none;
+  transition: width 0.2s ease;
+  width: 0%;
 }
 @keyframes progress-slide {
   0%   { transform: translateX(-200%); }

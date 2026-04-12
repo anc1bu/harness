@@ -10,6 +10,7 @@ import re
 import secrets
 import hashlib
 import sqlite3
+import threading
 from contextlib import contextmanager
 from functools import wraps
 from io import BytesIO
@@ -42,9 +43,13 @@ def _determine_table_type(name):
 
 
 # ── Validations ────────────────────────────────────────────────────────────
+# Each function is a single validation step. ctx is a dict of shared inputs:
+#   table_name, headers, data_rows, table_type, dd03l_db_name
+# Returns _ValResult on failure, None to pass.
 
-def _validate_headers_technical(headers, table_name, table_type):
+def _v1_technical_headers(ctx):
     """V1 — all headers must be technical names (no spaces). Applies to all table types."""
+    table_name, headers, table_type = ctx['table_name'], ctx['headers'], ctx['table_type']
     t = f'[{table_type}]'
     descriptive = [h for h in headers if ' ' in h]
     if descriptive:
@@ -58,11 +63,10 @@ def _validate_headers_technical(headers, table_name, table_type):
     return None
 
 
-def _validate_master(table_name, headers, data_rows, table_type, dd03l_db_name):
-    """Validations for master tables (e.g. DD03L)."""
+def _v2_required_cols(ctx):
+    """V2 — TABNAME and FIELDNAME columns must exist (master only)."""
+    table_name, headers, table_type = ctx['table_name'], ctx['headers'], ctx['table_type']
     t = f'[{table_type}]'
-
-    # V2: TABNAME and FIELDNAME columns must exist
     missing_cols = [c for c in ('TABNAME', 'FIELDNAME') if c not in headers]
     if missing_cols:
         return _ValResult(
@@ -70,15 +74,22 @@ def _validate_master(table_name, headers, data_rows, table_type, dd03l_db_name):
             error=f'[V2]{t} {table_name}: missing required columns: {", ".join(missing_cols)}',
             fields=[{'name': c, 'note': None} for c in missing_cols],
         )
+    return None
 
+
+def _v3_no_mixed_tabnames(ctx):
+    """V3 — DD03L cannot be mixed with other TABNAME values (master only)."""
+    table_name, headers, data_rows, table_type = (
+        ctx['table_name'], ctx['headers'], ctx['data_rows'], ctx['table_type']
+    )
+    t = f'[{table_type}]'
     tabname_idx = headers.index('TABNAME')
-
-    # V3: if DD03L appears in TABNAME, no other TABNAME values are allowed
     all_tabnames = {
         str(r[tabname_idx]).strip().upper()
         for r in data_rows
         if r[tabname_idx] is not None and str(r[tabname_idx]).strip() != ''
     }
+    ctx['all_tabnames'] = all_tabnames  # cache for V4/V5
     if 'DD03L' in all_tabnames and len(all_tabnames) > 1:
         others = sorted(all_tabnames - {'DD03L'})
         sample = ', '.join(others[:5]) + (' …' if len(others) > 5 else '')
@@ -88,17 +99,87 @@ def _validate_master(table_name, headers, data_rows, table_type, dd03l_db_name):
                    f'Please upload a file that contains only DD03L entries. Found other values: {sample}'),
             fields=[{'name': o, 'note': None} for o in others],
         )
+    return None
 
-    # V4: only if all TABNAME values equal DD03L — Excel columns must match FIELDNAME values
-    if all_tabnames == {'DD03L'}:
-        fieldname_idx = headers.index('FIELDNAME')
-        rollname_idx  = headers.index('ROLLNAME') if 'ROLLNAME' in headers else None
-        fieldname_vals = {
-            str(r[fieldname_idx]).strip()
-            for r in data_rows
-            if r[fieldname_idx] is not None
-            and (rollname_idx is None or (r[rollname_idx] is not None and str(r[rollname_idx]).strip() != ''))
-        }
+
+def _v4_self_ref_columns(ctx):
+    """V4 — self-referential DD03L: Excel columns must match FIELDNAME values (master only, all TABNAME='DD03L')."""
+    table_name, headers, data_rows, table_type = (
+        ctx['table_name'], ctx['headers'], ctx['data_rows'], ctx['table_type']
+    )
+    t = f'[{table_type}]'
+    all_tabnames = ctx.get('all_tabnames', set())
+    if all_tabnames != {'DD03L'}:
+        return None
+    fieldname_idx = headers.index('FIELDNAME')
+    rollname_idx  = headers.index('ROLLNAME') if 'ROLLNAME' in headers else None
+    fieldname_vals = {
+        str(r[fieldname_idx]).strip()
+        for r in data_rows
+        if r[fieldname_idx] is not None
+        and (rollname_idx is None or (r[rollname_idx] is not None and str(r[rollname_idx]).strip() != ''))
+    }
+    headers_set = set(headers)
+    extra   = sorted(headers_set - fieldname_vals)
+    missing = sorted(fieldname_vals - headers_set)
+    if extra or missing:
+        parts = []
+        if extra:   parts.append(f'extra columns: {", ".join(extra)}')
+        if missing: parts.append(f'missing columns: {", ".join(missing)}')
+        return _ValResult(
+            code='V4',
+            error=f'[V4]{t} {table_name}: the uploaded file columns do not match the expected field definitions. {"; ".join(parts)}',
+            fields=[{'name': f, 'note': 'extra'} for f in extra] + [{'name': f, 'note': 'missing'} for f in missing],
+        )
+    return None
+
+
+def _v5_non_self_ref_columns(ctx):
+    """V5 — non-self-referential DD03L: Excel columns must match existing DD03L DB definitions (master only, no TABNAME='DD03L')."""
+    table_name, headers, table_type, dd03l_db_name = (
+        ctx['table_name'], ctx['headers'], ctx['table_type'], ctx['dd03l_db_name']
+    )
+    t = f'[{table_type}]'
+    all_tabnames = ctx.get('all_tabnames', set())
+    if 'DD03L' in all_tabnames:
+        return None
+    with get_db() as conn:
+        # Step 1: DD03L must exist in DB
+        dd03l_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (dd03l_db_name,)
+        ).fetchone()
+        if not dd03l_exists:
+            return _ValResult(
+                code='V5',
+                error=f'[V5]{t} {table_name}: cannot validate columns — DD03L master table has not been uploaded yet.',
+                fields=[],
+            )
+        # Step 2: DD03L must have at least 30 self-referential rows
+        master_count = conn.execute(
+            f'SELECT COUNT(*) FROM "{dd03l_db_name}" WHERE TABNAME = \'DD03L\''
+        ).fetchone()[0]
+        if master_count < 30:
+            return _ValResult(
+                code='V5',
+                error=(f'[V5]{t} {table_name}: cannot validate columns — DD03L master data is incomplete '
+                       f'({master_count} rows where TABNAME="DD03L", need at least 30). '
+                       f'Upload a complete DD03L file first.'),
+                fields=[],
+            )
+        # Step 3: DD03L must have rows for the uploaded table
+        rows = conn.execute(
+            f'SELECT FIELDNAME FROM "{dd03l_db_name}" WHERE TABNAME = ? AND ROLLNAME IS NOT NULL AND ROLLNAME != \'\'',
+            (table_name.upper(),)
+        ).fetchall()
+        fieldname_vals = {r[0].strip() for r in rows if r[0] is not None}
+        if not fieldname_vals:
+            return _ValResult(
+                code='V5',
+                error=f'[V5]{t} {table_name}: no field definitions found in DD03L for table {table_name}.',
+                fields=[],
+            )
+        # Step 4: Compare columns
         headers_set = set(headers)
         extra   = sorted(headers_set - fieldname_vals)
         missing = sorted(fieldname_vals - headers_set)
@@ -107,84 +188,80 @@ def _validate_master(table_name, headers, data_rows, table_type, dd03l_db_name):
             if extra:   parts.append(f'extra columns: {", ".join(extra)}')
             if missing: parts.append(f'missing columns: {", ".join(missing)}')
             return _ValResult(
-                code='V4',
-                error=f'[V4]{t} {table_name}: the uploaded file columns do not match the expected field definitions. {"; ".join(parts)}',
+                code='V5',
+                error=f'[V5]{t} {table_name}: columns do not match DD03L field definitions. {"; ".join(parts)}',
                 fields=[{'name': f, 'note': 'extra'} for f in extra] + [{'name': f, 'note': 'missing'} for f in missing],
             )
-
-    # V5: only if TABNAME values are not DD03L — Excel columns must match DD03L field definitions
-    if 'DD03L' not in all_tabnames:
-        with get_db() as conn:
-            dd03l_exists = conn.execute(
-                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                (dd03l_db_name,)
-            ).fetchone()
-            if not dd03l_exists:
-                return None  # No DD03L table yet — skip V5, allow upload
-            rows = conn.execute(
-                f'SELECT FIELDNAME FROM "{dd03l_db_name}" WHERE TABNAME = ? AND ROLLNAME IS NOT NULL AND ROLLNAME != \'\'',
-                (table_name.upper(),)
-            ).fetchall()
-            fieldname_vals = {r[0].strip() for r in rows if r[0] is not None}
-            headers_set = set(headers)
-            extra   = sorted(headers_set - fieldname_vals)
-            missing = sorted(fieldname_vals - headers_set)
-            if extra or missing:
-                parts = []
-                if extra:   parts.append(f'extra columns: {", ".join(extra)}')
-                if missing: parts.append(f'missing columns: {", ".join(missing)}')
-                return _ValResult(
-                    code='V5',
-                    error=f'[V5]{t} {table_name}: columns do not match DD03L field definitions. {"; ".join(parts)}',
-                    fields=[{'name': f, 'note': 'extra'} for f in extra] + [{'name': f, 'note': 'missing'} for f in missing],
-                )
-
     return None
 
 
-def _validate_dd_headers(table_name, headers, table_type, dd03l_db_name, check_v8=True):
-    """Shared DD03L prerequisite + header match check (V6, V7, V8, V9)."""
+def _v6_dd03l_exists(ctx):
+    """V6 — DD03L master table must be loaded (basis/customizing only)."""
+    table_name, table_type, dd03l_db_name = ctx['table_name'], ctx['table_type'], ctx['dd03l_db_name']
     t = f'[{table_type}]'
     with get_db() as conn:
         dd03l_exists = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
             (dd03l_db_name,)
         ).fetchone()
-        dd03l_count = conn.execute(f'SELECT COUNT(*) FROM "{dd03l_db_name}"').fetchone()[0] if dd03l_exists else 0
+        dd03l_count  = conn.execute(f'SELECT COUNT(*) FROM "{dd03l_db_name}"').fetchone()[0] if dd03l_exists else 0
         master_count = conn.execute(
             f'SELECT COUNT(*) FROM "{dd03l_db_name}" WHERE TABNAME = \'DD03L\''
         ).fetchone()[0] if dd03l_exists else 0
+        ctx['master_count'] = master_count  # cache for V7
         if not dd03l_exists or dd03l_count == 0 or master_count == 0:
             return _ValResult(
                 code='V6',
                 error=f'[V6]{t} DD03L master table is not loaded. Upload DD03L before uploading {table_type} tables.',
                 fields=[],
             )
-        if master_count < 30:
+    return None
+
+
+def _v7_dd03l_complete(ctx):
+    """V7 — DD03L must have at least 30 self-referential rows (basis/customizing only)."""
+    table_name, table_type = ctx['table_name'], ctx['table_type']
+    t = f'[{table_type}]'
+    master_count = ctx.get('master_count', 0)
+    if master_count < 30:
+        return _ValResult(
+            code='V7',
+            error=(f'[V7]{t} DD03L master data is incomplete ({master_count} rows where TABNAME="DD03L", '
+                   f'need at least 30). Upload a complete DD03L file first.'),
+            fields=[],
+        )
+    return None
+
+
+def _v8_table_in_dd03l(ctx):
+    """V8 — uploaded table must have entries in DD03L (basis/customizing only)."""
+    table_name, table_type, dd03l_db_name = ctx['table_name'], ctx['table_type'], ctx['dd03l_db_name']
+    t = f'[{table_type}]'
+    with get_db() as conn:
+        exists_in_dd03l = conn.execute(
+            f'SELECT 1 FROM "{dd03l_db_name}" WHERE TABNAME = ?', (table_name.upper(),)
+        ).fetchone()
+        if not exists_in_dd03l:
             return _ValResult(
-                code='V7',
-                error=(f'[V7]{t} DD03L master data is incomplete ({master_count} rows where TABNAME="DD03L", '
-                       f'need at least 30). Upload a complete DD03L file first.'),
+                code='V8',
+                error=f'[V8]{t} no entries in master table (DD03L) for {table_name}.',
                 fields=[],
             )
+    return None
 
-        if check_v8:
-            exists_in_dd03l = conn.execute(
-                f'SELECT 1 FROM "{dd03l_db_name}" WHERE TABNAME = ?', (table_name.upper(),)
-            ).fetchone()
-            if not exists_in_dd03l:
-                return _ValResult(
-                    code='V8',
-                    error=f'[V8]{t} no entries in master table (DD03L) for {table_name}.',
-                    fields=[],
-                )
 
+def _v9_column_match(ctx):
+    """V9 — Excel columns must match DD03L field definitions (basis/customizing only)."""
+    table_name, headers, table_type, dd03l_db_name = (
+        ctx['table_name'], ctx['headers'], ctx['table_type'], ctx['dd03l_db_name']
+    )
+    t = f'[{table_type}]'
+    with get_db() as conn:
         rows = conn.execute(
             f'SELECT FIELDNAME FROM "{dd03l_db_name}" WHERE TABNAME = ? AND ROLLNAME IS NOT NULL AND ROLLNAME != \'\'',
             (table_name.upper(),)
         ).fetchall()
         fieldname_vals = {r[0].strip() for r in rows if r[0] is not None}
-
         headers_set = set(headers) - {'MANDT'}
         fieldname_vals -= {'MANDT'}
         extra   = sorted(headers_set - fieldname_vals)
@@ -198,12 +275,32 @@ def _validate_dd_headers(table_name, headers, table_type, dd03l_db_name, check_v
                 error=f'[V9]{t} {table_name}: Excel headers do not match DD03L field definitions. {"; ".join(parts)}',
                 fields=[{'name': f, 'note': 'extra'} for f in extra] + [{'name': f, 'note': 'missing'} for f in missing],
             )
-
     return None
 
 
-def _validate_basis(table_name, headers, data_rows, table_type, dd03l_db_name):
-    return _validate_dd_headers(table_name, headers, table_type, dd03l_db_name, check_v8=True)
+# ── Validation pipelines ───────────────────────────────────────────────────
+
+_VALIDATION_PIPELINE = {
+    'master':      [_v1_technical_headers, _v2_required_cols, _v3_no_mixed_tabnames, _v4_self_ref_columns, _v5_non_self_ref_columns],
+    'basis':       [_v1_technical_headers, _v6_dd03l_exists,  _v7_dd03l_complete,    _v8_table_in_dd03l,   _v9_column_match],
+    'customizing': [_v1_technical_headers, _v6_dd03l_exists,  _v7_dd03l_complete,    _v8_table_in_dd03l,   _v9_column_match],
+}
+
+
+def _run_validations(table_name, headers, data_rows, table_type, dd03l_db_name):
+    """Run the validation pipeline for the given table type. Returns first _ValResult or None."""
+    ctx = {
+        'table_name':    table_name,
+        'headers':       headers,
+        'data_rows':     data_rows,
+        'table_type':    table_type,
+        'dd03l_db_name': dd03l_db_name,
+    }
+    for step in _VALIDATION_PIPELINE.get(table_type, []):
+        vr = step(ctx)
+        if vr:
+            return vr
+    return None
 
 
 # ── Validation log / exception helpers ────────────────────────────────────
@@ -240,8 +337,9 @@ def _log_val_fields(conn, custname, validation, table_name, fields):
 
 @contextmanager
 def get_db():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA journal_mode=WAL')
     conn.execute('PRAGMA foreign_keys = ON')
     try:
         yield conn
@@ -251,6 +349,18 @@ def get_db():
         raise
     finally:
         conn.close()
+
+
+def _batched(iterable, n):
+    """Yield successive n-sized batches from iterable."""
+    batch = []
+    for item in iterable:
+        batch.append(item)
+        if len(batch) >= n:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
 
 
 def init_db():
@@ -306,6 +416,17 @@ def init_db():
             added_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(custname, validation, table_name, field_name)
         );
+        CREATE TABLE IF NOT EXISTS upload_jobs (
+            job_id         TEXT PRIMARY KEY,
+            custname       TEXT NOT NULL,
+            status         TEXT NOT NULL DEFAULT 'pending',
+            orig_table     TEXT,
+            table_name     TEXT,
+            table_type     TEXT,
+            rows_inserted  INTEGER,
+            error          TEXT,
+            created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
     ''')
 
     # Schema migrations for existing DBs (idempotent)
@@ -314,6 +435,19 @@ def init_db():
         'ALTER TABLE sessions ADD COLUMN custname TEXT',
         'ALTER TABLE _table_meta ADD COLUMN custname TEXT',
         'ALTER TABLE _table_meta ADD COLUMN orig_table TEXT',
+        '''CREATE TABLE IF NOT EXISTS upload_jobs (
+            job_id         TEXT PRIMARY KEY,
+            custname       TEXT NOT NULL,
+            status         TEXT NOT NULL DEFAULT 'pending',
+            orig_table     TEXT,
+            table_name     TEXT,
+            table_type     TEXT,
+            total_rows     INTEGER,
+            rows_inserted  INTEGER,
+            error          TEXT,
+            created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )''',
+        'ALTER TABLE upload_jobs ADD COLUMN total_rows INTEGER',
     ]:
         try:
             conn.execute(sql)
@@ -553,44 +687,57 @@ def upload_excel():
     db_table_name = f'{custname}_{system}_{table_name}'
     dd03l_db_name = f'{custname}_{system}_DD03L'
 
+    # ── Pre-file validation for basis/customizing (V6, V7, V8 need only DB) ──
+    # Run these before reading the file so large uploads are rejected instantly.
+    table_type = _determine_table_type(table_name)
+    if table_type != 'master':
+        pre_ctx = {
+            'table_name': table_name, 'table_type': table_type,
+            'dd03l_db_name': dd03l_db_name, 'headers': [], 'data_rows': [],
+        }
+        for step in [_v6_dd03l_exists, _v7_dd03l_complete, _v8_table_in_dd03l]:
+            pre_vr = step(pre_ctx)
+            if pre_vr:
+                with get_db() as conn:
+                    _log_val_fields(conn, custname, pre_vr.code, table_name, pre_vr.fields)
+                return jsonify({'error': pre_vr.error}), 422
+
+    # ── Read file bytes + headers only ────────────────────────────────────────
+    file_bytes = f.read()
     try:
-        wb = openpyxl.load_workbook(BytesIO(f.read()), read_only=True, data_only=True)
+        wb = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
     except Exception as e:
         return jsonify({'error': f'Cannot read Excel file: {e}'}), 422
 
     ws = wb.active
     rows_iter = ws.iter_rows(values_only=True)
-
     try:
         header_row = next(rows_iter)
     except StopIteration:
+        wb.close()
         return jsonify({'error': 'Excel file is empty'}), 422
 
     headers = [str(h).strip() if h is not None else f'col_{i}' for i, h in enumerate(header_row)]
     if not headers:
+        wb.close()
         return jsonify({'error': 'Excel file has no columns'}), 422
 
-    data_rows = list(rows_iter)
-
-    # ── Step 1: Determine table type ──────────────────────────────────────────
-    table_type = _determine_table_type(table_name)
-
-    # ── Step 2: V1 — technical headers check (all table types) ───────────────
-    vr = _validate_headers_technical(headers, table_name, table_type)
-    if vr:
-        with get_db() as conn:
-            _log_val_fields(conn, custname, vr.code, table_name, vr.fields)
-        return jsonify({'error': vr.error}), 422
-
-    # ── Step 3: Run type-specific validations ─────────────────────────────────
+    # For master tables, load data_rows now — needed for V3/V4 validation.
+    # Master files (DD03L) are small so this is fine synchronously.
+    # For basis/customizing, data_rows are not needed for validation.
     if table_type == 'master':
-        vr = _validate_master(table_name, headers, data_rows, table_type, dd03l_db_name)
+        data_rows = list(rows_iter)
     else:
-        vr = _validate_basis(table_name, headers, data_rows, table_type, dd03l_db_name)
+        data_rows = []
+    wb.close()
+
+    # ── Step 2: Run validation pipeline ───────────────────────────────────────
+    vr = _run_validations(table_name, headers, data_rows, table_type, dd03l_db_name)
     if vr:
         with get_db() as conn:
             _log_val_fields(conn, custname, vr.code, table_name, vr.fields)
-            if vr.code in _EXCEPTION_VALIDATIONS:
+            if vr.code in _EXCEPTION_VALIDATIONS and vr.fields:
+                # Exception check only applies when there are specific fields to except
                 exceptions = _get_exceptions(conn, custname, vr.code, table_name)
                 remaining  = [f for f in vr.fields if f['name'] not in exceptions]
                 if remaining:
@@ -607,77 +754,156 @@ def upload_excel():
                     return jsonify({'error': f'[{vr.code}]{t} {table_name}: {"; ".join(parts)}'}), 422
                 # all fields excepted — fall through and proceed with upload
             else:
+                # Hard block: prerequisite failures (empty fields) or non-exceptionable validations
                 return jsonify({'error': vr.error}), 422
 
-    # ── Step 4: Determine key fields ──────────────────────────────────────────
-    key_fields = set()
+    # ── Step 3: Count total rows (one streaming pass) ────────────────────────
     if table_type == 'master':
-        keyflag_idx   = headers.index('KEYFLAG')   if 'KEYFLAG'   in headers else None
-        fieldname_idx = headers.index('FIELDNAME') if 'FIELDNAME' in headers else None
-        if keyflag_idx is not None and fieldname_idx is not None:
-            for row in data_rows:
-                if (len(row) > keyflag_idx and str(row[keyflag_idx] or '').strip().upper() == 'X'
-                        and len(row) > fieldname_idx and row[fieldname_idx] is not None):
-                    key_fields.add(str(row[fieldname_idx]).strip())
+        total_rows = len(data_rows)
     else:
-        with get_db() as conn:
-            rows = conn.execute(
-                f'SELECT FIELDNAME FROM "{dd03l_db_name}" WHERE TABNAME = ? AND KEYFLAG = \'X\'',
-                (table_name.upper(),)
-            ).fetchall()
-            key_fields = {r[0].strip() for r in rows if r[0] is not None}
+        wb_count = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
+        total_rows = sum(1 for _ in wb_count.active.iter_rows(min_row=2, values_only=True))
+        wb_count.close()
 
-    # ── Step 5: Create table if needed, then insert ───────────────────────────
-    def _col_def(h):
-        return f'"{h}" TEXT PRIMARY KEY' if len(key_fields) == 1 and h in key_fields else f'"{h}" TEXT'
-
-    if len(key_fields) > 1:
-        col_defs = ', '.join(f'"{h}" TEXT' for h in headers)
-        pk_cols  = ', '.join(f'"{k}"' for k in headers if k in key_fields)
-        if pk_cols:
-            col_defs += f', PRIMARY KEY ({pk_cols})'
-    else:
-        col_defs = ', '.join(_col_def(h) for h in headers)
-
-    col_names    = ', '.join(f'"{h}"' for h in headers)
-    placeholders = ', '.join('?' for _ in headers)
-
+    # ── Step 4: Create job, start background insert ───────────────────────────
+    job_id = secrets.token_hex(8)
     with get_db() as conn:
-        conn.execute(f'CREATE TABLE IF NOT EXISTS "{db_table_name}" ({col_defs})')
         conn.execute(
-            'INSERT OR REPLACE INTO _table_meta (table_name, custname, orig_table, system, client, date) '
-            'VALUES (?, ?, ?, ?, ?, ?)',
-            (db_table_name, custname, table_name, system, client, date)
+            'INSERT INTO upload_jobs (job_id, custname, status, total_rows) VALUES (?, ?, ?, ?)',
+            (job_id, custname, 'pending', total_rows)
         )
-        all_values = [
-            [str(row[i]) if i < len(row) and row[i] is not None else None for i in range(len(headers))]
-            for row in data_rows
-        ]
-        conn.executemany(
-            f'INSERT OR REPLACE INTO "{db_table_name}" ({col_names}) VALUES ({placeholders})',
-            all_values
-        )
-        rows_inserted = len(all_values)
 
-        # Sort DD03L by TABNAME, POSITION after every insert
-        if table_name.upper() == 'DD03L' and 'TABNAME' in headers and 'POSITION' in headers:
-            tmp = db_table_name + '__sorted_tmp'
-            conn.execute(f'DROP TABLE IF EXISTS "{tmp}"')
-            conn.execute(
-                f'CREATE TABLE "{tmp}" AS '
-                f'SELECT * FROM "{db_table_name}" '
-                f'ORDER BY TABNAME ASC, CAST(POSITION AS INTEGER) ASC'
+    threading.Thread(
+        target=_bg_insert,
+        args=(job_id, custname, file_bytes, headers, data_rows,
+              table_name, db_table_name, dd03l_db_name, table_type, system, client, date),
+        daemon=True,
+    ).start()
+
+    return jsonify({'job_id': job_id, 'total_rows': total_rows})
+
+
+def _bg_insert(job_id, custname, file_bytes, headers, data_rows,
+               table_name, db_table_name, dd03l_db_name, table_type, system, client, date):
+    """Background thread: insert rows into SQLite and update job status."""
+    try:
+        n = len(headers)
+
+        # ── Determine key fields ───────────────────────────────────────────────
+        key_fields = set()
+        if table_type == 'master':
+            keyflag_idx   = headers.index('KEYFLAG')   if 'KEYFLAG'   in headers else None
+            fieldname_idx = headers.index('FIELDNAME') if 'FIELDNAME' in headers else None
+            if keyflag_idx is not None and fieldname_idx is not None:
+                for row in data_rows:
+                    if (len(row) > keyflag_idx and str(row[keyflag_idx] or '').strip().upper() == 'X'
+                            and len(row) > fieldname_idx and row[fieldname_idx] is not None):
+                        key_fields.add(str(row[fieldname_idx]).strip())
+        else:
+            with get_db() as conn:
+                rows = conn.execute(
+                    f'SELECT FIELDNAME FROM "{dd03l_db_name}" WHERE TABNAME = ? AND KEYFLAG = \'X\'',
+                    (table_name.upper(),)
+                ).fetchall()
+                key_fields = {r[0].strip() for r in rows if r[0] is not None}
+
+        # ── Build column definitions ───────────────────────────────────────────
+        def _col_def(h):
+            return f'"{h}" TEXT PRIMARY KEY' if len(key_fields) == 1 and h in key_fields else f'"{h}" TEXT'
+
+        if len(key_fields) > 1:
+            col_defs = ', '.join(f'"{h}" TEXT' for h in headers)
+            pk_cols  = ', '.join(f'"{k}"' for k in headers if k in key_fields)
+            if pk_cols:
+                col_defs += f', PRIMARY KEY ({pk_cols})'
+        else:
+            col_defs = ', '.join(_col_def(h) for h in headers)
+
+        col_names    = ', '.join(f'"{h}"' for h in headers)
+        placeholders = ', '.join('?' for _ in headers)
+
+        # ── Row source: stream from file for basis/customizing, use cached rows for master ──
+        def _stream_rows():
+            wb = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
+            ws = wb.active
+            it = ws.iter_rows(values_only=True)
+            next(it)  # skip header
+            for row in it:
+                yield [str(row[i]) if i < len(row) and row[i] is not None else None for i in range(n)]
+            wb.close()
+
+        if table_type == 'master':
+            row_source = (
+                [str(row[i]) if i < len(row) and row[i] is not None else None for i in range(n)]
+                for row in data_rows
             )
-            conn.execute(f'DROP TABLE "{db_table_name}"')
-            conn.execute(f'ALTER TABLE "{tmp}" RENAME TO "{db_table_name}"')
+        else:
+            row_source = _stream_rows()
 
-    return jsonify({
-        'ok': True,
-        'table': db_table_name,
-        'orig_table': table_name,
-        'table_type': table_type,
-        'rows_inserted': rows_inserted,
-    })
+        # ── Create table + meta ───────────────────────────────────────────────
+        with get_db() as conn:
+            conn.execute(f'CREATE TABLE IF NOT EXISTS "{db_table_name}" ({col_defs})')
+            conn.execute(
+                'INSERT OR REPLACE INTO _table_meta (table_name, custname, orig_table, system, client, date) '
+                'VALUES (?, ?, ?, ?, ?, ?)',
+                (db_table_name, custname, table_name, system, client, date)
+            )
+
+        # ── Insert in batches — commit each batch, update progress after each ──
+        rows_inserted = 0
+        for batch in _batched(row_source, 1000):
+            with get_db() as conn:
+                conn.executemany(
+                    f'INSERT OR REPLACE INTO "{db_table_name}" ({col_names}) VALUES ({placeholders})',
+                    batch
+                )
+            rows_inserted += len(batch)
+            with get_db() as conn:
+                conn.execute(
+                    'UPDATE upload_jobs SET rows_inserted=? WHERE job_id=?',
+                    (rows_inserted, job_id)
+                )
+
+        # ── Sort DD03L by TABNAME, POSITION after every insert ────────────────
+        if table_name.upper() == 'DD03L' and 'TABNAME' in headers and 'POSITION' in headers:
+            with get_db() as conn:
+                tmp = db_table_name + '__sorted_tmp'
+                conn.execute(f'DROP TABLE IF EXISTS "{tmp}"')
+                conn.execute(
+                    f'CREATE TABLE "{tmp}" AS '
+                    f'SELECT * FROM "{db_table_name}" '
+                    f'ORDER BY TABNAME ASC, CAST(POSITION AS INTEGER) ASC'
+                )
+                conn.execute(f'DROP TABLE "{db_table_name}"')
+                conn.execute(f'ALTER TABLE "{tmp}" RENAME TO "{db_table_name}"')
+
+        with get_db() as conn:
+            conn.execute(
+                'UPDATE upload_jobs SET status=?, rows_inserted=?, orig_table=?, table_name=?, table_type=? WHERE job_id=?',
+                ('done', rows_inserted, table_name, db_table_name, table_type, job_id)
+            )
+
+    except Exception as e:
+        with get_db() as conn:
+            conn.execute(
+                'UPDATE upload_jobs SET status=?, error=? WHERE job_id=?',
+                ('error', str(e), job_id)
+            )
+
+
+@app.get('/api/upload/status/<job_id>')
+@require_auth
+def upload_status(job_id):
+    custname = _session_custname()
+    with get_db() as conn:
+        job = conn.execute(
+            'SELECT status, orig_table, table_name, table_type, total_rows, rows_inserted, error '
+            'FROM upload_jobs WHERE job_id=? AND custname=?',
+            (job_id, custname)
+        ).fetchone()
+    if not job:
+        return jsonify({'error': 'Job not found'}), 404
+    return jsonify(dict(job))
 
 
 # ── Table data route ───────────────────────────────────────────────────────
