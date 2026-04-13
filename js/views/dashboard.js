@@ -62,11 +62,11 @@ function _tableSection(id, label, tbodyId) {
       <table class="meta-table">
         <thead>
           <tr>
-            <th>Table Name</th>
+            <th>Table</th>
             <th>System</th>
             <th>Client</th>
             <th>Date</th>
-            <th>Entry Count</th>
+            <th>Entry</th>
             <th>Action</th>
           </tr>
         </thead>
@@ -276,58 +276,93 @@ async function _handleFile(file, container, statusEl) {
 
   const [, tableName, system, client, date] = _FILENAME_RE.exec(file.name);
 
-  // No pending row yet — wait until server confirms validations pass
-  statusEl.textContent = `Uploading ${file.name}…`;
+  // Inject pending row immediately so the user sees activity right away.
+  // It will be removed if validation fails.
+  const { fill, label, entry, row } = _injectPendingRow(container, tableName, system, client, date);
+  label.textContent = 'Uploading file…';
+  statusEl.textContent = `Validating ${file.name}…`;
   statusEl.className = 'upload-status';
 
   const formData = new FormData();
   formData.append('file', file);
 
   try {
-    // Upload file — no progress bar yet
-    const result = await api.upload('/api/upload', formData);
+    const result = await api.uploadWithProgress('/api/upload', formData, (loaded, total) => {
+      const pct = Math.min(99, Math.round((loaded / total) * 100));
+      fill.classList.add('determinate');
+      fill.style.width = `${pct}%`;
+      label.textContent = `${pct}%`;
+    });
 
-    // Validations passed — server returned job_id + total_rows
-    // Now inject pending row with determinate progress bar
-    const { fill, label } = _injectPendingRow(container, tableName, system, client, date);
-    fill.style.width = '0%';
-    label.textContent = `0 / ${result.total_rows.toLocaleString()} rows`;
-    statusEl.textContent = `Processing ${file.name}…`;
+    // Validations passed — server returned job_id; total_rows counted in background
+    fill.classList.remove('determinate');
+    label.textContent = 'Counting rows…';
+    statusEl.textContent = 'Validations passed — counting rows…';
 
-    _pollJob(result.job_id, result.total_rows, container, statusEl, fill, label);
+    _pollJob(result.job_id, container, statusEl, fill, label, entry);
   } catch (err) {
+    row.remove();
     await _loadTablesMeta(container);
     statusEl.textContent = '';
     toast(`Upload failed: ${err.message}`, 'err');
   }
 }
 
-function _pollJob(jobId, totalRows, container, statusEl, fill, label) {
+function _pollJob(jobId, container, statusEl, fill, label, entry) {
   const interval = setInterval(async () => {
     try {
-      const job = await api.get(`/api/upload/status/${jobId}`);
+      const job      = await api.get(`/api/upload/status/${jobId}`);
       const inserted = job.rows_inserted || 0;
-      const total    = job.total_rows   || totalRows || 1;
-      const pct      = Math.min(100, Math.round((inserted / total) * 100));
-
-      // Update progress bar on every poll
-      fill.style.width = `${pct}%`;
-      label.textContent = `${inserted.toLocaleString()} / ${total.toLocaleString()} rows (${pct}%)`;
+      const total    = job.total_rows;
 
       if (job.status === 'done') {
         clearInterval(interval);
+        fill.classList.add('determinate');
         fill.style.width = '100%';
-        label.textContent = `${inserted.toLocaleString()} / ${total.toLocaleString()} rows (100%)`;
-        statusEl.textContent = `✓ Inserted ${inserted.toLocaleString()} rows into "${job.orig_table}"`;
+        label.textContent = '100%';
+        entry.textContent = inserted.toLocaleString();
+        statusEl.textContent = `✓ Done — ${inserted.toLocaleString()} rows inserted into "${job.orig_table}"`;
         statusEl.className = 'upload-status ok';
         document.addEventListener('click', () => { statusEl.textContent = ''; statusEl.className = 'upload-status'; }, { once: true });
         await _loadTablesMeta(container);
+
       } else if (job.status === 'error') {
         clearInterval(interval);
         await _loadTablesMeta(container);
         statusEl.textContent = '';
         toast(`Upload failed: ${job.error}`, 'err');
+
+      } else if (!total) {
+        // Background thread still counting rows — keep indeterminate bar
+        statusEl.textContent = 'Counting rows…';
+        label.textContent = 'Counting rows…';
+
+      } else if (job.phase === 'sorting') {
+        // All rows inserted — DD03L sort running on server
+        fill.classList.add('determinate');
+        fill.style.width = '100%';
+        label.textContent = '100%';
+        entry.textContent = `${inserted.toLocaleString()} / ${total ? total.toLocaleString() : '?'}`;
+        statusEl.textContent = 'Sorting table…';
+
+      } else if (inserted === 0) {
+        // Row count known, inserts not started yet
+        fill.classList.add('determinate');
+        fill.style.width = '0%';
+        label.textContent = '0%';
+        entry.textContent = `0 / ${total.toLocaleString()}`;
+        statusEl.textContent = `Inserting ${total.toLocaleString()} rows into database…`;
+
+      } else {
+        // Inserting in progress
+        const pct = Math.min(100, Math.round((inserted / total) * 100));
+        fill.classList.add('determinate');
+        fill.style.width = `${pct}%`;
+        label.textContent = `${pct}%`;
+        entry.textContent = `${inserted.toLocaleString()} / ${total.toLocaleString()}`;
+        statusEl.textContent = `Inserting… ${pct}%`;
       }
+
     } catch (err) {
       clearInterval(interval);
       statusEl.textContent = '';
@@ -358,11 +393,11 @@ function _injectPendingRow(container, tableName, system, client, date) {
     <td>${system}</td>
     <td>${client}</td>
     <td>${date}</td>
-    <td style="color:var(--text-dim)">—</td>
+    <td class="mt-entry" style="color:var(--text-dim)">—</td>
     <td>
       <div style="display:flex;align-items:center;gap:6px;">
-        <div class="upload-progress"><div class="upload-progress-fill determinate"></div></div>
-        <span class="upload-progress-label" style="font-size:10px;color:var(--text-dim);white-space:nowrap;">0%</span>
+        <div class="upload-progress"><div class="upload-progress-fill"></div></div>
+        <span class="upload-progress-label" style="font-size:10px;color:var(--text-dim);white-space:nowrap;">—</span>
       </div>
     </td>
   `;
@@ -371,6 +406,8 @@ function _injectPendingRow(container, tableName, system, client, date) {
   return {
     fill:  tr.querySelector('.upload-progress-fill'),
     label: tr.querySelector('.upload-progress-label'),
+    entry: tr.querySelector('.mt-entry'),
+    row:   tr,
   };
 }
 

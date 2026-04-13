@@ -299,7 +299,7 @@ tbody tr.selected td { background: rgba(74,222,128,0.10); color: var(--accent2);
 /* ── Upload progress bar ────────────────────────────────────────────────── */
 .upload-progress {
   flex-shrink: 0;
-  width: 64px; height: 3px; background: var(--border);
+  width: 90px; height: 3px; background: var(--border);
   border-radius: 2px; overflow: hidden;
 }
 .upload-progress-fill {

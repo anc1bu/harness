@@ -11,9 +11,11 @@ import secrets
 import hashlib
 import sqlite3
 import threading
+import zipfile
 from contextlib import contextmanager
 from functools import wraps
 from io import BytesIO
+from xml.etree.ElementTree import iterparse
 from flask import Flask, request, jsonify, send_from_directory
 import openpyxl
 from collections import namedtuple
@@ -25,6 +27,13 @@ _ValResult = namedtuple('_ValResult', ['code', 'error', 'fields'])
 _EXCEPTION_VALIDATIONS = frozenset({'V4', 'V5', 'V9', 'V-Show-2'})
 
 app = Flask(__name__, static_folder='.', static_url_path='')
+
+@app.after_request
+def _no_store_static(response):
+    """Prevent Cloudflare and browsers from caching JS/CSS — forces fresh fetch on every load."""
+    if request.path.endswith(('.js', '.css')):
+        response.headers['Cache-Control'] = 'no-store'
+    return response
 DB_PATH = os.path.join(os.path.dirname(__file__), 'db', 'harness.db')
 
 _UPLOAD_RE   = re.compile(r'^([A-Za-z0-9]+)_([A-Za-z0-9]+)_([A-Za-z0-9]+)_(\d+)\.xlsx$', re.IGNORECASE)
@@ -363,6 +372,32 @@ def _batched(iterable, n):
         yield batch
 
 
+def _count_xlsx_rows(file_bytes):
+    """Count data rows in an XLSX without openpyxl.
+
+    Scans <row> elements in the sheet XML inside the ZIP directly.
+    Uses a fraction of the memory and time compared to openpyxl for large files.
+    Returns row count excluding the header row.
+    """
+    try:
+        with zipfile.ZipFile(BytesIO(file_bytes)) as zf:
+            # Find the first worksheet (xl/worksheets/sheet1.xml is standard)
+            sheet_name = next(
+                (n for n in zf.namelist() if re.match(r'xl/worksheets/sheet\d+\.xml', n)),
+                None
+            )
+            if not sheet_name:
+                return 0
+            with zf.open(sheet_name) as f:
+                row_count = sum(
+                    1 for _, el in iterparse(f, events=['end'])
+                    if el.tag.endswith('}row') or el.tag == 'row'
+                )
+        return max(0, row_count - 1)  # subtract header row
+    except Exception:
+        return 0
+
+
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -420,6 +455,7 @@ def init_db():
             job_id         TEXT PRIMARY KEY,
             custname       TEXT NOT NULL,
             status         TEXT NOT NULL DEFAULT 'pending',
+            phase          TEXT,
             orig_table     TEXT,
             table_name     TEXT,
             table_type     TEXT,
@@ -448,6 +484,7 @@ def init_db():
             created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )''',
         'ALTER TABLE upload_jobs ADD COLUMN total_rows INTEGER',
+        'ALTER TABLE upload_jobs ADD COLUMN phase TEXT',
     ]:
         try:
             conn.execute(sql)
@@ -757,20 +794,14 @@ def upload_excel():
                 # Hard block: prerequisite failures (empty fields) or non-exceptionable validations
                 return jsonify({'error': vr.error}), 422
 
-    # ── Step 3: Count total rows (one streaming pass) ────────────────────────
-    if table_type == 'master':
-        total_rows = len(data_rows)
-    else:
-        wb_count = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
-        total_rows = sum(1 for _ in wb_count.active.iter_rows(min_row=2, values_only=True))
-        wb_count.close()
-
-    # ── Step 4: Create job, start background insert ───────────────────────────
+    # ── Step 3: Create job, start background insert ──────────────────────────
+    # total_rows is counted inside the background thread to avoid blocking the
+    # request (iterating 700K+ rows synchronously causes Cloudflare 524 timeouts).
     job_id = secrets.token_hex(8)
     with get_db() as conn:
         conn.execute(
-            'INSERT INTO upload_jobs (job_id, custname, status, total_rows) VALUES (?, ?, ?, ?)',
-            (job_id, custname, 'pending', total_rows)
+            'INSERT INTO upload_jobs (job_id, custname, status) VALUES (?, ?, ?)',
+            (job_id, custname, 'pending')
         )
 
     threading.Thread(
@@ -780,14 +811,25 @@ def upload_excel():
         daemon=True,
     ).start()
 
-    return jsonify({'job_id': job_id, 'total_rows': total_rows})
+    return jsonify({'job_id': job_id})
 
 
 def _bg_insert(job_id, custname, file_bytes, headers, data_rows,
                table_name, db_table_name, dd03l_db_name, table_type, system, client, date):
-    """Background thread: insert rows into SQLite and update job status."""
+    """Background thread: count rows, then insert into SQLite and update job status."""
     try:
         n = len(headers)
+
+        # ── Count total rows first so the frontend can show a determinate bar ──
+        # For basis/customizing, scan raw ZIP/XML to count <row> elements instead
+        # of using openpyxl — openpyxl holds ~900 MB RAM for a 46 MB XLSX and takes
+        # several minutes, starving the gunicorn worker and causing 524 timeouts.
+        if table_type == 'master':
+            total_rows = len(data_rows)
+        else:
+            total_rows = _count_xlsx_rows(file_bytes)
+        with get_db() as conn:
+            conn.execute('UPDATE upload_jobs SET total_rows=? WHERE job_id=?', (total_rows, job_id))
 
         # ── Determine key fields ───────────────────────────────────────────────
         key_fields = set()
@@ -866,6 +908,8 @@ def _bg_insert(job_id, custname, file_bytes, headers, data_rows,
 
         # ── Sort DD03L by TABNAME, POSITION after every insert ────────────────
         if table_name.upper() == 'DD03L' and 'TABNAME' in headers and 'POSITION' in headers:
+            with get_db() as conn:
+                conn.execute('UPDATE upload_jobs SET phase=? WHERE job_id=?', ('sorting', job_id))
             with get_db() as conn:
                 tmp = db_table_name + '__sorted_tmp'
                 conn.execute(f'DROP TABLE IF EXISTS "{tmp}"')
