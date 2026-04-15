@@ -30,6 +30,25 @@ export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
   const container = document.createElement('div');
   container.className = 'tbl-container';
 
+  // ── Export bar ────────────────────────────────────────────────────────────
+  const exportBar = document.createElement('div');
+  exportBar.className = 'tbl-export-bar';
+  exportBar.innerHTML = `
+    <span class="tbl-export-count"></span>
+    <button class="tbl-export-btn" title="Export to Excel">
+      <svg width="22" height="22" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+        <rect width="24" height="24" rx="3" fill="#1d6f42"/>
+        <rect x="13" y="3" width="8" height="18" rx="1" fill="#21a366"/>
+        <rect x="3" y="3" width="11" height="18" rx="1" fill="#107c41"/>
+        <line x1="13" y1="3" x2="13" y2="21" stroke="#185c37" stroke-width="0.5"/>
+        <line x1="3" y1="9" x2="21" y2="9" stroke="#185c37" stroke-width="0.5" opacity="0.5"/>
+        <line x1="3" y1="15" x2="21" y2="15" stroke="#185c37" stroke-width="0.5" opacity="0.5"/>
+        <text x="7.5" y="16" font-family="Arial,sans-serif" font-size="11" font-weight="bold" fill="white" text-anchor="middle">X</text>
+      </svg>
+    </button>
+  `;
+  container.appendChild(exportBar);
+
   // Toolbar (visible only when filters are active)
   const toolbar = document.createElement('div');
   toolbar.className = 'tbl-toolbar';
@@ -123,6 +142,8 @@ export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
 
     tbody.innerHTML = html;
     toolbar.style.display = activeFilters.size ? '' : 'none';
+    exportBar.querySelector('.tbl-export-count').textContent =
+      filtered.length.toLocaleString() + ' row' + (filtered.length === 1 ? '' : 's');
 
     // Update active-filter indicators on headers and filter inputs
     cols.forEach(c => {
@@ -270,6 +291,19 @@ export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
     });
   });
 
+  // Export to CSV
+  exportBar.querySelector('.tbl-export-btn').addEventListener('click', () => {
+    const filtered = _getFilteredRows();
+    const csv = _toCsv(filtered, cols);
+    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href     = url;
+    a.download = 'export.csv';
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
   // Clear all filters
   toolbar.querySelector('.tbl-clear-all').addEventListener('click', () => {
     activeFilters.clear();
@@ -305,4 +339,16 @@ export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
 
 function _esc(str) {
   return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function _toCsv(rows, cols) {
+  const esc = v => {
+    const s = String(v ?? '');
+    return (s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r'))
+      ? `"${s.replace(/"/g, '""')}"`
+      : s;
+  };
+  const lines = [cols.map(esc).join(',')];
+  for (const r of rows) lines.push(cols.map(c => esc(r[c] ?? '')).join(','));
+  return lines.join('\r\n');
 }

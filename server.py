@@ -1112,20 +1112,26 @@ def get_table_data(table):
         # ── Build rows with enriched cell values ──
         desc_cache = {}  # (col, key_vals_tuple) -> str or None
 
+        row_keys = set(raw_cols)
+
         def _get_cell_desc(col, row):
             cfg = col_lookup.get(col)
             if not cfg:
                 return None
-            key_vals = tuple(row[kf] for kf in cfg['key_fields'])
+            # Only use key fields that actually exist in the source row
+            available_kfs = [kf for kf in cfg['key_fields'] if kf in row_keys]
+            if not available_kfs:
+                return None
+            key_vals = tuple(row[kf] for kf in available_kfs)
             if any(v is None or str(v).strip() == '' for v in key_vals):
                 return None
             cache_key = (col, key_vals)
             if cache_key in desc_cache:
                 return desc_cache[cache_key]
-            placeholders = ' AND '.join(f'"{kf}"=?' for kf in cfg['key_fields'])
+            placeholders = ' AND '.join(f'"{kf}"=?' for kf in available_kfs)
             vtext_row = conn.execute(
                 f'SELECT VTEXT FROM "{cfg["text_db"]}" WHERE SPRAS=? AND {placeholders}',
-                ('E', *key_vals)
+                ('EN', *key_vals)
             ).fetchone()
             desc = vtext_row['VTEXT'].strip() if vtext_row and vtext_row['VTEXT'] else None
             desc_cache[cache_key] = desc
