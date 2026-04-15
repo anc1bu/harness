@@ -1,6 +1,6 @@
 // Data table renderer with per-column Excel-style filtering.
 
-const PREVIEW_LIMIT = 200;
+const PREVIEW_LIMIT = 5000;
 const MAX_DROPDOWN_VALS = 500;
 
 export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
@@ -318,16 +318,53 @@ export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
   };
   document.addEventListener('click', _onDocClick);
 
-  // Close dropdown on wrap scroll (repositioning would be complex)
-  const _onWrapScroll = () => { if (openDropdownCol) _closeDropdown(); };
+  // ── Scroll position indicator ─────────────────────────────────────────
+  const scrollIndicator = document.createElement('div');
+  scrollIndicator.className = 'tbl-scroll-indicator';
+  scrollIndicator.style.opacity = '0';
+  document.body.appendChild(scrollIndicator);
+
+  let _hideScrollTimer = null;
+  let _rowHeight = null;
+
+  const _onWrapScroll = () => {
+    if (openDropdownCol) _closeDropdown();
+
+    // Estimate row height once from a real rendered row
+    if (!_rowHeight) {
+      const sampleTr = tbody.querySelector('tr');
+      _rowHeight = sampleTr ? sampleTr.offsetHeight || 28 : 28;
+    }
+
+    const filtered   = _getFilteredRows();
+    const totalShown = Math.min(filtered.length, PREVIEW_LIMIT);
+    const theadH     = thead.offsetHeight;
+    const scrolled   = Math.max(0, wrapEl.scrollTop - theadH);
+    const firstRow   = Math.floor(scrolled / _rowHeight) + 1;
+    const lastRow    = Math.min(totalShown, Math.ceil((scrolled + wrapEl.clientHeight) / _rowHeight));
+
+    scrollIndicator.textContent = `${firstRow} / ${totalShown}`;
+
+    // Position: right side of wrapEl, vertically centered in the viewport slice
+    const rect = wrapEl.getBoundingClientRect();
+    scrollIndicator.style.top  = `${rect.top + rect.height / 2 - 12}px`;
+    scrollIndicator.style.left = `${rect.right - 110}px`;
+    scrollIndicator.style.opacity = '1';
+
+    clearTimeout(_hideScrollTimer);
+    _hideScrollTimer = setTimeout(() => { scrollIndicator.style.opacity = '0'; }, 1200);
+  };
+
   wrapEl.addEventListener('scroll', _onWrapScroll);
 
   // ── Cleanup ───────────────────────────────────────────────────────────────
   wrapEl._filterCleanup = () => {
     document.removeEventListener('click', _onDocClick);
     wrapEl.removeEventListener('scroll', _onWrapScroll);
+    clearTimeout(_hideScrollTimer);
     if (stickyFrame) cancelAnimationFrame(stickyFrame);
     dropdown.remove();
+    scrollIndicator.remove();
     delete wrapEl._filterCleanup;
   };
 

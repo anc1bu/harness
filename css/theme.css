@@ -296,6 +296,15 @@ tbody tr.selected td { background: rgba(137,180,250,0.12); color: var(--accent);
 .avatar-menu-item.danger:hover { background: rgba(224,96,96,0.08); color: var(--danger); }
 .avatar-menu-item:last-child { border-radius: 0 0 5px 5px; }
 
+/* ── Scroll position indicator ─────────────────────────────────────────── */
+.tbl-scroll-indicator {
+  position: fixed; z-index: 2100; pointer-events: none;
+  background: rgba(230,237,243,0.95); border: 1px solid #aab4be;
+  color: #1c2128; font-family: 'Courier New', monospace; font-size: 11px;
+  padding: 4px 10px; border-radius: 4px; white-space: nowrap;
+  transition: opacity .15s;
+}
+
 /* ── Table filter toolbar ──────────────────────────────────────────────── */
 .tbl-container { display: flex; flex-direction: column; }
 .tbl-export-bar {

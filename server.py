@@ -398,6 +398,137 @@ def _count_xlsx_rows(file_bytes):
         return 0
 
 
+def _load_shared_strings(zf):
+    """Load the shared strings table from an open ZipFile. Returns list indexed by position."""
+    shared = []
+    if 'xl/sharedStrings.xml' not in zf.namelist():
+        return shared
+    with zf.open('xl/sharedStrings.xml') as f:
+        current_parts = []
+        for event, el in iterparse(f, events=['start', 'end']):
+            tag = el.tag.split('}')[-1]
+            if event == 'start' and tag == 'si':
+                current_parts = []
+            elif event == 'end' and tag == 't':
+                current_parts.append(el.text or '')
+                el.clear()
+            elif event == 'end' and tag == 'si':
+                shared.append(''.join(current_parts))
+    return shared
+
+
+def _col_letters_to_idx(ref):
+    """Convert a cell reference like 'A1' or 'BC3' to a 0-based column index."""
+    idx = 0
+    for ch in ref:
+        if not ch.isalpha():
+            break
+        idx = idx * 26 + (ord(ch.upper()) - 64)
+    return idx - 1
+
+
+def _read_xlsx_headers(file_bytes):
+    """Read the header row from an XLSX using ZIP/XML streaming — no openpyxl.
+
+    Returns (headers_list, error_string). On success error_string is None.
+    """
+    try:
+        with zipfile.ZipFile(BytesIO(file_bytes)) as zf:
+            shared = _load_shared_strings(zf)
+            sheet_name = next(
+                (n for n in zf.namelist() if re.match(r'xl/worksheets/sheet\d+\.xml', n)),
+                None
+            )
+            if not sheet_name:
+                return None, 'No worksheet found in Excel file'
+            cells = {}
+            in_first_row = False
+            cur_ref = cur_type = cur_val = None
+            in_is = False
+            with zf.open(sheet_name) as f:
+                for event, el in iterparse(f, events=['start', 'end']):
+                    tag = el.tag.split('}')[-1]
+                    if event == 'start' and tag == 'row':
+                        if el.get('r', '1') == '1':
+                            in_first_row = True
+                        elif in_first_row:
+                            break
+                    elif event == 'start' and tag == 'c' and in_first_row:
+                        cur_ref  = el.get('r', '')
+                        cur_type = el.get('t', '')
+                        cur_val  = None
+                        in_is    = False
+                    elif event == 'start' and tag == 'is':
+                        in_is = True
+                    elif event == 'end' and tag == 'v' and in_first_row and not in_is:
+                        cur_val = el.text
+                    elif event == 'end' and tag == 't' and in_first_row and in_is:
+                        cur_val = el.text
+                    elif event == 'end' and tag == 'c' and in_first_row and cur_ref:
+                        col_idx = _col_letters_to_idx(cur_ref)
+                        if cur_type == 's' and cur_val is not None:
+                            val = shared[int(cur_val)] if int(cur_val) < len(shared) else ''
+                        else:
+                            val = cur_val or ''
+                        cells[col_idx] = val
+            if not cells:
+                return None, 'Excel file is empty'
+            max_col = max(cells.keys())
+            return [cells.get(i, '') for i in range(max_col + 1)], None
+    except Exception as e:
+        return None, f'Cannot read Excel file: {e}'
+
+
+def _stream_xlsx_rows(file_bytes, n_cols):
+    """Stream data rows from an XLSX using ZIP/XML — no openpyxl, constant memory.
+
+    Yields each data row (after the header) as a list of n_cols values (str or None).
+    Handles sparse rows: missing cells are yielded as None.
+    """
+    with zipfile.ZipFile(BytesIO(file_bytes)) as zf:
+        shared = _load_shared_strings(zf)
+        sheet_name = next(
+            (n for n in zf.namelist() if re.match(r'xl/worksheets/sheet\d+\.xml', n)),
+            None
+        )
+        if not sheet_name:
+            return
+        with zf.open(sheet_name) as f:
+            row_cells  = {}
+            first_row  = True
+            cur_ref    = cur_type = cur_val = None
+            in_is      = False
+            for event, el in iterparse(f, events=['start', 'end']):
+                tag = el.tag.split('}')[-1]
+                if event == 'start' and tag == 'row':
+                    row_cells = {}
+                elif event == 'end' and tag == 'row':
+                    if first_row:
+                        first_row = False
+                    else:
+                        yield [row_cells.get(i) for i in range(n_cols)]
+                    row_cells = {}
+                elif event == 'start' and tag == 'c':
+                    cur_ref  = el.get('r', '')
+                    cur_type = el.get('t', '')
+                    cur_val  = None
+                    in_is    = False
+                elif event == 'start' and tag == 'is':
+                    in_is = True
+                elif event == 'end' and tag == 'v' and not in_is:
+                    cur_val = el.text
+                elif event == 'end' and tag == 't' and in_is:
+                    cur_val = el.text
+                elif event == 'end' and tag == 'c' and cur_ref:
+                    col_idx = _col_letters_to_idx(cur_ref)
+                    if col_idx < n_cols:
+                        if cur_type == 's' and cur_val is not None:
+                            val = shared[int(cur_val)] if int(cur_val) < len(shared) else None
+                        else:
+                            val = cur_val
+                        row_cells[col_idx] = val
+
+
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -740,33 +871,32 @@ def upload_excel():
                 return jsonify({'error': pre_vr.error}), 422
 
     # ── Read file bytes + headers only ────────────────────────────────────────
+    # Use ZIP/XML streaming to avoid loading the full workbook with openpyxl.
+    # openpyxl holds ~900 MB RAM for a 46 MB XLSX — on large files this causes OOM.
     file_bytes = f.read()
-    try:
-        wb = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
-    except Exception as e:
-        return jsonify({'error': f'Cannot read Excel file: {e}'}), 422
+    raw_headers, err = _read_xlsx_headers(file_bytes)
+    if err:
+        return jsonify({'error': err}), 422
 
-    ws = wb.active
-    rows_iter = ws.iter_rows(values_only=True)
-    try:
-        header_row = next(rows_iter)
-    except StopIteration:
-        wb.close()
-        return jsonify({'error': 'Excel file is empty'}), 422
-
-    headers = [str(h).strip() if h is not None else f'col_{i}' for i, h in enumerate(header_row)]
+    headers = [str(h).strip() if h else f'col_{i}' for i, h in enumerate(raw_headers)]
     if not headers:
-        wb.close()
         return jsonify({'error': 'Excel file has no columns'}), 422
 
     # For master tables, load data_rows now — needed for V3/V4 validation.
-    # Master files (DD03L) are small so this is fine synchronously.
+    # Master files (DD03L) are small so openpyxl is fine here.
     # For basis/customizing, data_rows are not needed for validation.
     if table_type == 'master':
+        try:
+            wb = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
+        except Exception as e:
+            return jsonify({'error': f'Cannot read Excel file: {e}'}), 422
+        ws = wb.active
+        rows_iter = ws.iter_rows(values_only=True)
+        next(rows_iter)  # skip header
         data_rows = list(rows_iter)
+        wb.close()
     else:
         data_rows = []
-    wb.close()
 
     # ── Step 2: Run validation pipeline ───────────────────────────────────────
     vr = _run_validations(table_name, headers, data_rows, table_type, dd03l_db_name)
@@ -866,13 +996,8 @@ def _bg_insert(job_id, custname, file_bytes, headers, data_rows,
 
         # ── Row source: stream from file for basis/customizing, use cached rows for master ──
         def _stream_rows():
-            wb = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
-            ws = wb.active
-            it = ws.iter_rows(values_only=True)
-            next(it)  # skip header
-            for row in it:
-                yield [str(row[i]) if i < len(row) and row[i] is not None else None for i in range(n)]
-            wb.close()
+            # Use ZIP/XML streaming instead of openpyxl to avoid ~900 MB RAM per 46 MB file.
+            yield from _stream_xlsx_rows(file_bytes, n)
 
         if table_type == 'master':
             row_source = (
