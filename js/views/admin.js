@@ -9,6 +9,10 @@ import { avatarDropdownHtml, initAvatarDropdown } from '../components/avatar.js'
 const SECTIONS = ['Customers', 'Users', 'Validations'];
 const _EXCEPTION_VALIDATIONS = new Set(['V4', 'V5', 'V9', 'V-Show-2']);
 
+function _esc(str) {
+  return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 export function mount(container) {
   container.innerHTML = `
     <div id="topbar">

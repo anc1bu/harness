@@ -3,7 +3,7 @@
 import { api } from '../api.js';
 import { logout } from '../auth.js';
 import { navigate } from '../router.js';
-import { getState, subscribe, unsubscribe } from '../state.js';
+import { getState } from '../state.js';
 import { toast } from '../components/modal.js';
 import { renderTable } from '../components/table.js';
 import { avatarDropdownHtml, initAvatarDropdown } from '../components/avatar.js';
@@ -41,16 +41,6 @@ export function mount(container) {
   ];
   initAvatarDropdown(container, menuItems);
 
-  const onRowsChange = (rows) => _refreshDataTable(container, rows);
-  subscribe('rows', onRowsChange);
-
-  const observer = new MutationObserver(() => {
-    if (!document.contains(container.querySelector('#panel-graph'))) {
-      unsubscribe('rows', onRowsChange);
-      observer.disconnect();
-    }
-  });
-  observer.observe(container, { childList: true });
 }
 
 // ── HTML ───────────────────────────────────────────────────────────────────
@@ -310,6 +300,10 @@ async function _handleFile(file, container, statusEl) {
 
 function _pollJob(jobId, container, statusEl, fill, label, entry) {
   const interval = setInterval(async () => {
+    if (!container.querySelector('#drop-zone')) {
+      clearInterval(interval);
+      return;
+    }
     try {
       const job      = await api.get(`/api/upload/status/${jobId}`);
       const inserted = job.rows_inserted || 0;
@@ -411,22 +405,7 @@ function _injectPendingRow(container, tableName, system, client, date) {
   };
 }
 
-// ── Right panel data table ─────────────────────────────────────────────────
-
-function _refreshDataTable(container, rows) {
-  const emptyEl = container.querySelector('#table-empty');
-  const wrapEl  = container.querySelector('#table-wrap');
-  if (!rows || !rows.length) {
-    emptyEl.style.display = '';
-    wrapEl.style.display = 'none';
-    return;
-  }
-  emptyEl.style.display = 'none';
-  wrapEl.style.display = '';
-  renderTable(wrapEl, { rows, columns: getState('columns') });
-}
-
-// ── Table Show Validations ─────────────────────────────────────────────────
+// ── Table data ─────────────────────────────────────────────────────────────
 
 async function _loadTableData(container, table, origTable) {
   const emptyEl   = container.querySelector('#table-empty');

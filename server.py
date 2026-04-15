@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import hashlib
+import hmac
 import sqlite3
 import threading
 import zipfile
@@ -650,7 +651,7 @@ def _verify_password(password: str, stored: str) -> bool:
     try:
         _, iterations, salt, hash_hex = stored.split(':')
         h = hashlib.pbkdf2_hmac('sha256', password.encode(), salt.encode(), int(iterations))
-        return h.hex() == hash_hex
+        return hmac.compare_digest(h.hex(), hash_hex)
     except Exception:
         return False
 
@@ -1024,8 +1025,7 @@ def _bg_insert(job_id, custname, file_bytes, headers, data_rows,
                     f'INSERT OR REPLACE INTO "{db_table_name}" ({col_names}) VALUES ({placeholders})',
                     batch
                 )
-            rows_inserted += len(batch)
-            with get_db() as conn:
+                rows_inserted += len(batch)
                 conn.execute(
                     'UPDATE upload_jobs SET rows_inserted=? WHERE job_id=?',
                     (rows_inserted, job_id)
@@ -1066,7 +1066,7 @@ def upload_status(job_id):
     custname = _session_custname()
     with get_db() as conn:
         job = conn.execute(
-            'SELECT status, orig_table, table_name, table_type, total_rows, rows_inserted, error '
+            'SELECT status, phase, orig_table, table_name, table_type, total_rows, rows_inserted, error '
             'FROM upload_jobs WHERE job_id=? AND custname=?',
             (job_id, custname)
         ).fetchone()
@@ -1391,6 +1391,7 @@ def delete_customer(custname):
 
 @app.get('/api/users')
 @require_auth
+@require_admin
 def list_users():
     with get_db() as conn:
         users = conn.execute(
