@@ -969,6 +969,7 @@ def get_table_data(table):
         dd03l_name = f'{custname}_{system}_DD03L'
         dd04t_name = f'{custname}_{system}_DD04T'
         dd08l_name = f'{custname}_{system}_DD08L'
+        dd07t_name = f'{custname}_{system}_DD07T'
 
         # Fetch raw rows
         try:
@@ -1059,6 +1060,10 @@ def get_table_data(table):
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (dd08l_name,)
         ).fetchone()
 
+        dd07t_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (dd07t_name,)
+        ).fetchone()
+
         col_lookup = {}      # col -> {'text_db': str, 'key_fields': [str], 'text_table': str}
         col_hints = {}       # col -> [hint lines for tooltip]
         if dd08l_exists_check and dd03l_exists:
@@ -1109,6 +1114,26 @@ def get_table_data(table):
 
                 col_lookup[col] = {'text_db': text_db, 'key_fields': key_fields, 'text_table': text_table}
 
+        # ── DD07T domain value descriptions (columns without CHECKTABLE) ──
+        if dd03l_exists:
+            for col in raw_cols:
+                if col in col_lookup or col in col_hints:
+                    continue
+                dom_row = conn.execute(
+                    f'SELECT CHECKTABLE, DOMNAME FROM "{dd03l_name}" WHERE TABNAME=? AND FIELDNAME=?',
+                    (orig_table.upper(), col)
+                ).fetchone()
+                if not dom_row or not dom_row['DOMNAME'] or not dom_row['DOMNAME'].strip():
+                    continue
+                checktable = (dom_row['CHECKTABLE'] or '').strip()
+                if checktable and checktable != '*':
+                    continue  # has a real CHECKTABLE — handled by DD08L path
+                domname = dom_row['DOMNAME'].strip()
+                if dd07t_exists:
+                    col_lookup[col] = {'source': 'dd07t', 'domname': domname, 'dd07t_db': dd07t_name}
+                else:
+                    col_hints[col] = [f'DD07T: not uploaded (domain: {domname})']
+
         # ── Build rows with enriched cell values ──
         desc_cache = {}  # (col, key_vals_tuple) -> str or None
 
@@ -1118,6 +1143,21 @@ def get_table_data(table):
             cfg = col_lookup.get(col)
             if not cfg:
                 return None
+            if cfg.get('source') == 'dd07t':
+                val = row[col]
+                if val is None or str(val).strip() == '':
+                    return None
+                cache_key = (col, val)
+                if cache_key in desc_cache:
+                    return desc_cache[cache_key]
+                result = conn.execute(
+                    f'SELECT DDTEXT FROM "{cfg["dd07t_db"]}" '
+                    'WHERE DOMNAME=? AND DDLANGUAGE=? AND AS4LOCAL=? AND DOMVALUE_L=?',
+                    (cfg['domname'], 'EN', 'A', str(val))
+                ).fetchone()
+                desc = result['DDTEXT'].strip() if result and result['DDTEXT'] else None
+                desc_cache[cache_key] = desc
+                return desc
             # Only use key fields that actually exist in the source row
             available_kfs = [kf for kf in cfg['key_fields'] if kf in row_keys]
             if not available_kfs:
@@ -1137,17 +1177,27 @@ def get_table_data(table):
             desc_cache[cache_key] = desc
             return desc
 
+        dd07t_missing_cols = set()
         rows_out = []
         for row in raw_rows:
             enriched_row = {}
             for raw_col, enriched_col in zip(raw_cols, enriched_cols):
                 val = row[raw_col]
                 desc = _get_cell_desc(raw_col, row)
+                cfg = col_lookup.get(raw_col)
+                if cfg and cfg.get('source') == 'dd07t' and desc is None:
+                    if val is not None and str(val).strip():
+                        dd07t_missing_cols.add(raw_col)
                 if desc and val is not None and str(val).strip() != '':
                     enriched_row[enriched_col] = f'{val} - {desc}'
                 else:
                     enriched_row[enriched_col] = val
             rows_out.append(enriched_row)
+
+        for col in dd07t_missing_cols:
+            if col not in col_hints:
+                domname = col_lookup[col]['domname']
+                col_hints[col] = [f'DD07T: some values have no text (domain: {domname})']
 
         col_text_tables = {
             enriched_col: col_hints[raw_col]
