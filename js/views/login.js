@@ -3,6 +3,10 @@
 import { login, selectCustomer } from '../auth.js';
 import { navigate } from '../router.js';
 
+function _esc(str) {
+  return String(str ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 export function mount(container) {
   container.innerHTML = `
     <div id="login-view">
@@ -68,6 +72,7 @@ export function mount(container) {
   }
 
   btn.addEventListener('click', submit);
+  usernameEl.addEventListener('keydown', e => { if (e.key === 'Enter') passwordEl.focus(); });
   passwordEl.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
   usernameEl.focus();
 }
@@ -77,9 +82,9 @@ function _renderCustomerList(custBox, customers) {
   const errorEl  = custBox.querySelector('#cust-error');
 
   listEl.innerHTML = customers.map(c => `
-    <button class="btn" data-custname="${c.custname}" data-name="${c.name}" style="text-align:left;margin-bottom:0">
-      <span style="color:var(--accent2)">${c.custname}</span>
-      <span style="color:var(--text-dim);margin-left:10px;font-size:10px">${c.name}</span>
+    <button class="btn" data-custname="${_esc(c.custname)}" data-name="${_esc(c.name)}" style="text-align:left;margin-bottom:0">
+      <span style="color:var(--accent2)">${_esc(c.custname)}</span>
+      <span style="color:var(--text-dim);margin-left:10px;font-size:10px">${_esc(c.name)}</span>
     </button>
   `).join('');
 

@@ -72,10 +72,10 @@ async function _renderCustomers(el) {
             <tbody>
               ${customers.map(c => `
                 <tr>
-                  <td class="mt-name">${c.custname}</td>
-                  <td>${c.name}</td>
+                  <td class="mt-name">${_esc(c.custname)}</td>
+                  <td>${_esc(c.name)}</td>
                   <td>
-                    <button class="btn danger btn-del-cust" data-custname="${c.custname}"
+                    <button class="btn danger btn-del-cust" data-custname="${_esc(c.custname)}"
                       style="padding:2px 8px;font-size:10px;margin:0">Delete</button>
                   </td>
                 </tr>
@@ -171,16 +171,16 @@ function _renderUserRows(el, users, allCustomers) {
   const tbody = el.querySelector('#users-tbody');
   tbody.innerHTML = users.map(u => `
     <tr data-user-id="${u.id}">
-      <td class="mt-name">${u.username}</td>
+      <td class="mt-name">${_esc(u.username)}</td>
       <td>
         <label style="display:flex;align-items:center;gap:6px;cursor:${u.username === 'admin' ? 'not-allowed' : 'pointer'}">
-          <input type="checkbox" class="chk-admin" data-user-id="${u.id}" data-username="${u.username}"
+          <input type="checkbox" class="chk-admin" data-user-id="${u.id}" data-username="${_esc(u.username)}"
             ${u.is_admin ? 'checked' : ''} ${u.username === 'admin' ? 'disabled' : ''} />
           <span style="font-size:10px;color:var(--text-dim)">${u.is_admin ? 'Yes' : 'No'}</span>
         </label>
       </td>
       <td>
-        <button class="btn inline btn-manage-cust" data-user-id="${u.id}" data-username="${u.username}"
+        <button class="btn inline btn-manage-cust" data-user-id="${u.id}" data-username="${_esc(u.username)}"
           style="margin:0;padding:2px 10px;font-size:10px">Customers</button>
       </td>
     </tr>
@@ -234,10 +234,10 @@ async function _toggleCustomerPanel(el, userId, username, allCustomers) {
 
     listEl.innerHTML = allCustomers.map(c => `
       <label style="display:flex;align-items:center;gap:8px;padding:6px 0;cursor:pointer;font-size:11px">
-        <input type="checkbox" class="chk-cust" data-custname="${c.custname}" data-user-id="${userId}"
+        <input type="checkbox" class="chk-cust" data-custname="${_esc(c.custname)}" data-user-id="${userId}"
           ${assignedSet.has(c.custname) ? 'checked' : ''} />
-        <span style="color:var(--accent2)">${c.custname}</span>
-        <span style="color:var(--text-dim)">${c.name}</span>
+        <span style="color:var(--accent2)">${_esc(c.custname)}</span>
+        <span style="color:var(--text-dim)">${_esc(c.name)}</span>
       </label>
     `).join('');
 
@@ -314,15 +314,15 @@ async function _renderValidationLogs(el) {
               action = '<span style="color:var(--accent);font-size:10px;letter-spacing:1px">✓ EXCEPTED</span>';
             } else {
               action = `<button class="btn inline btn-add-exc" style="margin:0;padding:2px 8px;font-size:10px"
-                          data-validation="${l.validation}" data-table="${l.table_name}" data-field="${l.field_name}">
+                          data-validation="${_esc(l.validation)}" data-table="${_esc(l.table_name)}" data-field="${_esc(l.field_name)}">
                           + Add Exception
                         </button>`;
             }
             return `<tr>
-              <td style="color:var(--accent2);font-weight:600">${l.validation}</td>
-              <td class="mt-name">${l.table_name}</td>
-              <td>${l.field_name ?? '<span style="color:var(--text-dim)">—</span>'}</td>
-              <td style="color:var(--text-dim)">${l.note ?? '—'}</td>
+              <td style="color:var(--accent2);font-weight:600">${_esc(l.validation)}</td>
+              <td class="mt-name">${_esc(l.table_name)}</td>
+              <td>${l.field_name != null ? _esc(l.field_name) : '<span style="color:var(--text-dim)">—</span>'}</td>
+              <td style="color:var(--text-dim)">${l.note != null ? _esc(l.note) : '—'}</td>
               <td style="color:var(--text-dim);font-size:10px">${(l.triggered_at || '').slice(0, 16)}</td>
               <td>${action}</td>
             </tr>`;
@@ -360,9 +360,9 @@ async function _renderValidationExceptions(el) {
         </thead>
         <tbody>
           ${exceptions.map(e => `<tr>
-            <td style="color:var(--accent2);font-weight:600">${e.validation}</td>
-            <td class="mt-name">${e.table_name}</td>
-            <td>${e.field_name}</td>
+            <td style="color:var(--accent2);font-weight:600">${_esc(e.validation)}</td>
+            <td class="mt-name">${_esc(e.table_name)}</td>
+            <td>${_esc(e.field_name)}</td>
             <td style="color:var(--text-dim);font-size:10px">${(e.added_at || '').slice(0, 16)}</td>
             <td><button class="btn danger btn-rm-exc" data-id="${e.id}"
                   style="margin:0;padding:2px 8px;font-size:10px">× Remove</button></td>
