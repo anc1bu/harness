@@ -968,6 +968,7 @@ def get_table_data(table):
         system     = meta['system']
         dd03l_name = f'{custname}_{system}_DD03L'
         dd04t_name = f'{custname}_{system}_DD04T'
+        dd08l_name = f'{custname}_{system}_DD08L'
 
         # Fetch raw rows
         try:
@@ -976,7 +977,7 @@ def get_table_data(table):
             return jsonify({'error': str(e)}), 500
 
         if not raw_rows:
-            return jsonify({'columns': [], 'rows': [], 'dd04t_missing': False, 'partial_descriptions': False})
+            return jsonify({'columns': [], 'rows': [], 'dd04t_missing': False, 'dd08l_missing': False, 'partial_descriptions': False})
 
         raw_cols = list(raw_rows[0].keys())
 
@@ -986,6 +987,15 @@ def get_table_data(table):
         ).fetchone()
         dd04t_count = conn.execute(f'SELECT COUNT(*) FROM "{dd04t_name}"').fetchone()[0] if dd04t_exists else 0
         dd04t_missing = not dd04t_exists or dd04t_count == 0
+
+        # Check DD08L existence and records for the viewed table
+        dd08l_exists_check = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (dd08l_name,)
+        ).fetchone()
+        dd08l_count = conn.execute(
+            f'SELECT COUNT(*) FROM "{dd08l_name}" WHERE TABNAME=?', (orig_table.upper(),)
+        ).fetchone()[0] if dd08l_exists_check else 0
+        dd08l_missing = not dd08l_exists_check or dd08l_count == 0
 
         # Build enriched headers
         enriched_cols = []
@@ -1043,14 +1053,110 @@ def get_table_data(table):
         if all_missing:
             _log_val_fields(conn, custname, 'V-Show-2', orig_table, all_missing)
 
-        rows_out = [dict(zip(enriched_cols, [row[c] for c in raw_cols])) for row in raw_rows]
+        # ── Build text-table lookup config per column (once per request) ──
+        # For each column: DD03L → CHECKTABLE → DD08L (FRKART='TEXT') → text table → key fields
+        dd08l_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (dd08l_name,)
+        ).fetchone()
+
+        col_lookup = {}      # col -> {'text_db': str, 'key_fields': [str], 'text_table': str}
+        col_hints = {}       # col -> [hint lines for tooltip]
+        if dd08l_exists_check and dd03l_exists:
+            for col in raw_cols:
+                ct_row = conn.execute(
+                    f'SELECT CHECKTABLE FROM "{dd03l_name}" WHERE TABNAME=? AND FIELDNAME=?',
+                    (orig_table.upper(), col)
+                ).fetchone()
+                if not ct_row or not ct_row['CHECKTABLE'] or ct_row['CHECKTABLE'].strip() == '*':
+                    continue
+                checktable = ct_row['CHECKTABLE'].strip()
+
+                tt_row = conn.execute(
+                    f'SELECT TABNAME FROM "{dd08l_name}" WHERE FIELDNAME=? AND CHECKTABLE=? AND AS4LOCAL=? AND FRKART=?',
+                    (col, checktable, 'A', 'TEXT')
+                ).fetchone()
+                if not tt_row or not tt_row['TABNAME']:
+                    col_hints[col] = [
+                        f'DD08L: no text entry for {orig_table}',
+                        f'CHECKTABLE: {checktable}',
+                    ]
+                    continue
+                text_table = tt_row['TABNAME'].strip()
+                text_db = f'{custname}_{system}_{text_table}'
+
+                tt_exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (text_db,)
+                ).fetchone()
+                if not tt_exists:
+                    col_hints[col] = [
+                        f'CHECKTABLE: {checktable}',
+                        f'Text table: {text_table} not uploaded',
+                    ]
+                    continue
+
+                kf_rows = conn.execute(
+                    f'SELECT FIELDNAME FROM "{dd03l_name}" WHERE TABNAME=? AND KEYFLAG=? AND FIELDNAME!=?',
+                    (checktable, 'X', 'MANDT')
+                ).fetchall()
+                key_fields = [r['FIELDNAME'] for r in kf_rows if r['FIELDNAME']]
+                if not key_fields:
+                    col_hints[col] = [
+                        f'CHECKTABLE: {checktable}',
+                        f'Text table: {text_table}',
+                        f'DD03L: no entries for {checktable}',
+                    ]
+                    continue
+
+                col_lookup[col] = {'text_db': text_db, 'key_fields': key_fields, 'text_table': text_table}
+
+        # ── Build rows with enriched cell values ──
+        desc_cache = {}  # (col, key_vals_tuple) -> str or None
+
+        def _get_cell_desc(col, row):
+            cfg = col_lookup.get(col)
+            if not cfg:
+                return None
+            key_vals = tuple(row[kf] for kf in cfg['key_fields'])
+            if any(v is None or str(v).strip() == '' for v in key_vals):
+                return None
+            cache_key = (col, key_vals)
+            if cache_key in desc_cache:
+                return desc_cache[cache_key]
+            placeholders = ' AND '.join(f'"{kf}"=?' for kf in cfg['key_fields'])
+            vtext_row = conn.execute(
+                f'SELECT VTEXT FROM "{cfg["text_db"]}" WHERE SPRAS=? AND {placeholders}',
+                ('E', *key_vals)
+            ).fetchone()
+            desc = vtext_row['VTEXT'].strip() if vtext_row and vtext_row['VTEXT'] else None
+            desc_cache[cache_key] = desc
+            return desc
+
+        rows_out = []
+        for row in raw_rows:
+            enriched_row = {}
+            for raw_col, enriched_col in zip(raw_cols, enriched_cols):
+                val = row[raw_col]
+                desc = _get_cell_desc(raw_col, row)
+                if desc and val is not None and str(val).strip() != '':
+                    enriched_row[enriched_col] = f'{val} - {desc}'
+                else:
+                    enriched_row[enriched_col] = val
+            rows_out.append(enriched_row)
+
+        col_text_tables = {
+            enriched_col: col_hints[raw_col]
+            for raw_col, enriched_col in zip(raw_cols, enriched_cols)
+            if raw_col in col_hints
+        }
 
     return jsonify({
         'columns': enriched_cols,
         'rows': rows_out,
         'dd04t_missing': dd04t_missing,
+        'dd08l_missing': dd08l_missing,
         'partial_descriptions': partial_descriptions,
         'missing_fields': missing_fields,
+        'col_text_tables': col_text_tables,
     })
 
 

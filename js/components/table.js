@@ -1,33 +1,306 @@
-// Data table renderer. Previews up to 200 rows.
-// Usage: renderTable(wrapEl, { rows, columns })
+// Data table renderer with per-column Excel-style filtering.
 
 const PREVIEW_LIMIT = 200;
+const MAX_DROPDOWN_VALS = 500;
 
-export function renderTable(wrapEl, { rows, columns }) {
+export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
+  // Cleanup previous render
+  if (wrapEl._filterCleanup) wrapEl._filterCleanup();
+
   if (!rows.length) {
     wrapEl.innerHTML = '';
     return;
   }
 
-  const preview = rows.slice(0, PREVIEW_LIMIT);
   const cols = columns.length ? columns : Object.keys(rows[0]);
 
-  let html = '<table><thead><tr>';
-  cols.forEach(c => { html += `<th title="${_esc(c)}">${_esc(c)}</th>`; });
-  html += '</tr></thead><tbody>';
-
-  preview.forEach((r, i) => {
-    html += `<tr data-i="${i}">`;
-    cols.forEach(c => { html += `<td>${_esc(String(r[c] ?? ''))}</td>`; });
-    html += '</tr>';
+  // ── Unique values per column (all rows, not just preview) ─────────────────
+  const uniqueVals = new Map();
+  cols.forEach(c => {
+    const vals = [...new Set(rows.map(r => String(r[c] ?? '')))].sort();
+    uniqueVals.set(c, vals);
   });
 
-  if (rows.length > PREVIEW_LIMIT) {
-    html += `<tr><td colspan="${cols.length}" style="text-align:center;color:var(--text-dim);padding:10px">… ${rows.length - PREVIEW_LIMIT} more rows</td></tr>`;
+  // ── Filter state ──────────────────────────────────────────────────────────
+  const activeFilters = new Map(); // col → Set<string>
+  let openDropdownCol  = null;
+  let _isSearchTyping  = false;
+
+  // ── Build DOM ─────────────────────────────────────────────────────────────
+  const container = document.createElement('div');
+  container.className = 'tbl-container';
+
+  // Toolbar (visible only when filters are active)
+  const toolbar = document.createElement('div');
+  toolbar.className = 'tbl-toolbar';
+  toolbar.style.display = 'none';
+  toolbar.innerHTML = '<button class="tbl-clear-all">✕ CLEAR ALL FILTERS</button>';
+  container.appendChild(toolbar);
+
+  // Table
+  const table = document.createElement('table');
+  const thead  = document.createElement('thead');
+
+  // ── Filter-input row (above header) ───────────────────────────────────────
+  const filterTr = document.createElement('tr');
+  filterTr.className = 'tbl-filter-row';
+  cols.forEach(c => {
+    const th = document.createElement('th');
+    th.className = 'tbl-filter-th';
+    th.dataset.col = c;
+    const inp = document.createElement('input');
+    inp.type        = 'text';
+    inp.placeholder = '…';
+    inp.className   = 'tbl-filter-input';
+    inp.dataset.col = c;
+    th.appendChild(inp);
+    filterTr.appendChild(th);
+  });
+  thead.appendChild(filterTr);
+
+  // ── Column-header row ─────────────────────────────────────────────────────
+  const headerTr = document.createElement('tr');
+  cols.forEach(c => {
+    const th = document.createElement('th');
+    th.className   = 'tbl-col-header';
+    th.dataset.col = c;
+    const colTip = colTextTables[c] ? colTextTables[c].map(_esc).join('&#10;') : _esc(c);
+    th.innerHTML   = `<span class="tbl-col-name" title="${colTip}">${_esc(c)}</span>`
+                   + `<button class="tbl-filter-btn" data-col="${_esc(c)}" title="Filter">▾</button>`;
+    headerTr.appendChild(th);
+  });
+  thead.appendChild(headerTr);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  table.appendChild(tbody);
+  container.appendChild(table);
+
+  // ── Floating dropdown (appended to <body> to escape overflow clipping) ────
+  const dropdown = document.createElement('div');
+  dropdown.className    = 'tbl-filter-dropdown';
+  dropdown.style.display = 'none';
+  document.body.appendChild(dropdown);
+
+  // ── Sticky header: offset the header row below the filter row ─────────────
+  // (runs after element is in the DOM)
+  let stickyFrame;
+  const _fixStickyTop = () => {
+    const h = filterTr.offsetHeight;
+    if (h) {
+      headerTr.querySelectorAll('th').forEach(th => { th.style.top = `${h}px`; });
+    } else {
+      stickyFrame = requestAnimationFrame(_fixStickyTop);
+    }
+  };
+
+  // ── Row rendering ─────────────────────────────────────────────────────────
+  function _getFilteredRows() {
+    if (!activeFilters.size) return rows;
+    return rows.filter(r => {
+      for (const [col, vals] of activeFilters) {
+        if (vals.size > 0 && !vals.has(String(r[col] ?? ''))) return false;
+      }
+      return true;
+    });
   }
 
-  html += '</tbody></table>';
-  wrapEl.innerHTML = html;
+  function _renderRows() {
+    const filtered = _getFilteredRows();
+    const preview  = filtered.slice(0, PREVIEW_LIMIT);
+
+    let html = preview.map((r, i) => {
+      let tr = `<tr data-i="${i}">`;
+      cols.forEach(c => { tr += `<td>${_esc(String(r[c] ?? ''))}</td>`; });
+      return tr + '</tr>';
+    }).join('');
+
+    if (!filtered.length) {
+      html = `<tr><td colspan="${cols.length}" style="text-align:center;color:var(--text-dim);padding:16px">No rows match current filters</td></tr>`;
+    } else if (filtered.length > PREVIEW_LIMIT) {
+      html += `<tr><td colspan="${cols.length}" style="text-align:center;color:var(--text-dim);padding:10px">… ${(filtered.length - PREVIEW_LIMIT).toLocaleString()} more rows (${filtered.length.toLocaleString()} total filtered)</td></tr>`;
+    }
+
+    tbody.innerHTML = html;
+    toolbar.style.display = activeFilters.size ? '' : 'none';
+
+    // Update active-filter indicators on headers and filter inputs
+    cols.forEach(c => {
+      const isActive = (activeFilters.get(c)?.size ?? 0) > 0;
+      headerTr.querySelector(`th[data-col="${c}"]`)?.classList.toggle('filter-active', isActive);
+      filterTr.querySelector(`th[data-col="${c}"]`)?.classList.toggle('filter-active', isActive);
+    });
+  }
+
+  // ── Dropdown ──────────────────────────────────────────────────────────────
+  function _openDropdown(col, anchorEl, searchText, focusSearch) {
+    openDropdownCol = col;
+    _renderDropdown(col, anchorEl, searchText, focusSearch);
+  }
+
+  function _renderDropdown(col, anchorEl, searchText, focusSearch) {
+    const allVals  = uniqueVals.get(col);
+    const selected = activeFilters.get(col) || new Set();
+
+    const matchVals  = searchText
+      ? allVals.filter(v => v.toLowerCase().includes(searchText.toLowerCase()))
+      : allVals;
+    const visible  = matchVals.slice(0, MAX_DROPDOWN_VALS);
+    const hasMore  = matchVals.length > MAX_DROPDOWN_VALS;
+    const allChk   = visible.length > 0 && visible.every(v => selected.has(v));
+    const someChk  = visible.some(v => selected.has(v));
+
+    const listHtml = visible.length === 0
+      ? '<div class="tfd-empty">No matching values</div>'
+      : visible.map(v =>
+          `<label class="tfd-item"><input type="checkbox" class="tfd-check-val" data-val="${_esc(v)}" ${selected.has(v) ? 'checked' : ''} />`
+        + `<span>${_esc(v) || '<em style="color:var(--text-dim)">(empty)</em>'}</span></label>`
+        ).join('')
+        + (hasMore ? `<div class="tfd-more">… ${(matchVals.length - MAX_DROPDOWN_VALS).toLocaleString()} more — type to narrow</div>` : '');
+
+    const isNewOpen = dropdown.style.display === 'none' || dropdown.dataset.col !== col;
+
+    dropdown.innerHTML = `
+      <div class="tfd-search-wrap">
+        <input type="text" class="tfd-search" placeholder="Search values…" value="${_esc(searchText)}" />
+      </div>
+      <div class="tfd-actions">
+        <label class="tfd-item tfd-select-all">
+          <input type="checkbox" class="tfd-check-all" ${allChk ? 'checked' : ''} />
+          <span>Select All</span>
+        </label>
+        <button class="tfd-clear">Clear</button>
+      </div>
+      <div class="tfd-list">${listHtml}</div>
+    `;
+
+    dropdown.querySelector('.tfd-check-all').indeterminate = someChk && !allChk;
+    dropdown.dataset.col = col;
+
+    if (isNewOpen) {
+      _positionDropdown(anchorEl);
+      dropdown.style.display = '';
+    }
+
+    // Focus management
+    const searchInput = dropdown.querySelector('.tfd-search');
+    if (focusSearch || _isSearchTyping) {
+      searchInput.focus();
+      searchInput.setSelectionRange(searchText.length, searchText.length);
+    }
+    _isSearchTyping = false;
+
+    // ── Bind dropdown events ───────────────────────────────────────────────
+    searchInput.addEventListener('input', e => {
+      _isSearchTyping = true;
+      const text = e.target.value;
+      filterTr.querySelector(`.tbl-filter-input[data-col="${col}"]`).value = text;
+      _renderDropdown(col, anchorEl, text, false);
+    });
+
+    dropdown.querySelector('.tfd-check-all').addEventListener('change', e => {
+      const text = dropdown.querySelector('.tfd-search').value;
+      const vis  = text
+        ? allVals.filter(v => v.toLowerCase().includes(text.toLowerCase()))
+        : allVals;
+      const sel  = new Set(activeFilters.get(col) || []);
+      if (e.target.checked) vis.forEach(v => sel.add(v));
+      else                   vis.forEach(v => sel.delete(v));
+      if (sel.size) activeFilters.set(col, sel); else activeFilters.delete(col);
+      _renderRows();
+      _renderDropdown(col, anchorEl, text, false);
+    });
+
+    dropdown.querySelectorAll('.tfd-check-val').forEach(cb => {
+      cb.addEventListener('change', e => {
+        const val  = e.target.dataset.val;
+        const text = dropdown.querySelector('.tfd-search').value;
+        const sel  = new Set(activeFilters.get(col) || []);
+        if (e.target.checked) sel.add(val); else sel.delete(val);
+        if (sel.size) activeFilters.set(col, sel); else activeFilters.delete(col);
+        _renderRows();
+        _renderDropdown(col, anchorEl, text, false);
+      });
+    });
+
+    dropdown.querySelector('.tfd-clear').addEventListener('click', () => {
+      activeFilters.delete(col);
+      filterTr.querySelector(`.tbl-filter-input[data-col="${col}"]`).value = '';
+      _renderRows();
+      _closeDropdown();
+    });
+  }
+
+  function _positionDropdown(anchorEl) {
+    const rect = anchorEl.getBoundingClientRect();
+    dropdown.style.left = `${rect.left}px`;
+    dropdown.style.top  = `${rect.bottom + 2}px`;
+    requestAnimationFrame(() => {
+      const dr = dropdown.getBoundingClientRect();
+      if (dr.right > window.innerWidth - 4) {
+        dropdown.style.left = `${Math.max(4, rect.right - dr.width)}px`;
+      }
+    });
+  }
+
+  function _closeDropdown() {
+    dropdown.style.display = 'none';
+    openDropdownCol = null;
+  }
+
+  // ── Event bindings ────────────────────────────────────────────────────────
+
+  // Filter input row
+  filterTr.querySelectorAll('.tbl-filter-input').forEach(inp => {
+    const col = inp.dataset.col;
+    inp.addEventListener('focus', ()  => _openDropdown(col, inp.parentElement, inp.value, false));
+    inp.addEventListener('input', e   => _openDropdown(col, inp.parentElement, e.target.value, false));
+  });
+
+  // Column header filter buttons
+  headerTr.querySelectorAll('.tbl-filter-btn').forEach(btn => {
+    const col = btn.dataset.col;
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      if (openDropdownCol === col) _closeDropdown();
+      else {
+        const fi = filterTr.querySelector(`.tbl-filter-input[data-col="${col}"]`);
+        _openDropdown(col, btn.closest('th'), fi?.value || '', true);
+      }
+    });
+  });
+
+  // Clear all filters
+  toolbar.querySelector('.tbl-clear-all').addEventListener('click', () => {
+    activeFilters.clear();
+    filterTr.querySelectorAll('.tbl-filter-input').forEach(i => { i.value = ''; });
+    _closeDropdown();
+    _renderRows();
+  });
+
+  // Close dropdown on outside click
+  const _onDocClick = e => {
+    if (!dropdown.contains(e.target) && !table.contains(e.target)) _closeDropdown();
+  };
+  document.addEventListener('click', _onDocClick);
+
+  // Close dropdown on wrap scroll (repositioning would be complex)
+  const _onWrapScroll = () => { if (openDropdownCol) _closeDropdown(); };
+  wrapEl.addEventListener('scroll', _onWrapScroll);
+
+  // ── Cleanup ───────────────────────────────────────────────────────────────
+  wrapEl._filterCleanup = () => {
+    document.removeEventListener('click', _onDocClick);
+    wrapEl.removeEventListener('scroll', _onWrapScroll);
+    if (stickyFrame) cancelAnimationFrame(stickyFrame);
+    dropdown.remove();
+    delete wrapEl._filterCleanup;
+  };
+
+  // ── Initial render ────────────────────────────────────────────────────────
+  _renderRows();
+  wrapEl.replaceChildren(container);
+  stickyFrame = requestAnimationFrame(_fixStickyTop);
 }
 
 function _esc(str) {

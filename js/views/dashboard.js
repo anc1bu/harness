@@ -442,6 +442,12 @@ async function _loadTableData(container, table, origTable) {
       return;
     }
 
+    // V-Show-1b: DD08L missing or empty → error, do not show
+    if (data.dd08l_missing) {
+      toast('pls upload DD08L table', 'err');
+      return;
+    }
+
     // V-Show-2: DD04T exists but some descriptions missing → warning, still show
     if (data.partial_descriptions) {
       const fields  = (data.missing_fields || []).slice(0, 5);
@@ -460,7 +466,7 @@ async function _loadTableData(container, table, origTable) {
 
     emptyEl.style.display = 'none';
     wrapEl.style.display = '';
-    renderTable(wrapEl, { rows: data.rows, columns: data.columns });
+    renderTable(wrapEl, { rows: data.rows, columns: data.columns, colTextTables: data.col_text_tables || {} });
   } catch (err) {
     toast(`Failed to load table data: ${err.message}`, 'err');
   }
