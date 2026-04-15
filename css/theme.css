@@ -298,6 +298,17 @@ tbody tr.selected td { background: rgba(137,180,250,0.12); color: var(--accent);
 
 /* ── Table filter toolbar ──────────────────────────────────────────────── */
 .tbl-container { display: flex; flex-direction: column; }
+.tbl-export-bar {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 5px 10px; background: var(--bg); border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.tbl-export-count { font-size: 11px; color: var(--text-dim); }
+.tbl-export-btn {
+  background: transparent; border: none; cursor: pointer; padding: 2px; line-height: 0;
+  border-radius: 4px; opacity: 0.85; transition: opacity .15s;
+}
+.tbl-export-btn:hover { opacity: 1; }
 .tbl-toolbar {
   display: flex; align-items: center; justify-content: flex-end;
   padding: 4px 8px; background: var(--bg); border-bottom: 1px solid var(--border);
