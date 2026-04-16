@@ -94,13 +94,16 @@ def _v3_no_mixed_tabnames(ctx):
         ctx['table_name'], ctx['headers'], ctx['data_rows'], ctx['table_type']
     )
     t = f'[{table_type}]'
-    tabname_idx = headers.index('TABNAME')
-    all_tabnames = {
-        str(r[tabname_idx]).strip().upper()
-        for r in data_rows
-        if r[tabname_idx] is not None and str(r[tabname_idx]).strip() != ''
-    }
-    ctx['all_tabnames'] = all_tabnames  # cache for V4/V5
+    if 'all_tabnames' in ctx:
+        all_tabnames = ctx['all_tabnames']
+    else:
+        tabname_idx = headers.index('TABNAME')
+        all_tabnames = {
+            str(r[tabname_idx]).strip().upper()
+            for r in data_rows
+            if r[tabname_idx] is not None and str(r[tabname_idx]).strip() != ''
+        }
+        ctx['all_tabnames'] = all_tabnames  # cache for V4/V5
     if 'DD03L' in all_tabnames and len(all_tabnames) > 1:
         others = sorted(all_tabnames - {'DD03L'})
         sample = ', '.join(others[:5]) + (' …' if len(others) > 5 else '')
@@ -1091,6 +1094,13 @@ def _bg_insert(job_id, custname, file_path, headers, data_rows,
                 )
                 conn.execute(f'DROP TABLE "{db_table_name}"')
                 conn.execute(f'ALTER TABLE "{tmp}" RENAME TO "{db_table_name}"')
+            # Index TABNAME (and composite TABNAME+FIELDNAME) so per-table lookups
+            # in get_table_data don't full-scan 1M+ rows on every column query.
+            with get_db() as conn:
+                conn.execute(f'UPDATE upload_jobs SET phase=? WHERE job_id=?', ('indexing', job_id))
+            with get_db() as conn:
+                conn.execute(f'CREATE INDEX IF NOT EXISTS "idx_{db_table_name}_tabname" ON "{db_table_name}" (TABNAME)')
+                conn.execute(f'CREATE INDEX IF NOT EXISTS "idx_{db_table_name}_tabname_fieldname" ON "{db_table_name}" (TABNAME, FIELDNAME)')
 
         with get_db() as conn:
             conn.execute(
@@ -1273,6 +1283,29 @@ def get_table_data(table):
                     f'SELECT TABNAME FROM "{dd08l_name}" WHERE FIELDNAME=? AND CHECKTABLE=? AND AS4LOCAL=? AND FRKART=?',
                     (col, lookup_checktable, 'A', 'TEXT')
                 ).fetchone()
+                text_key_field = col  # which key field in the text table maps to this column's value
+
+                if not tt_row or not tt_row['TABNAME']:
+                    # Fallback: source column name may differ from the CHECKTABLE's own field name
+                    # (e.g. T685A.RKSCHL → T685.KSCHL). Try key fields of the CHECKTABLE.
+                    seen = set()
+                    for kf_r in conn.execute(
+                        f'SELECT FIELDNAME FROM "{dd03l_name}" WHERE TABNAME=? AND KEYFLAG=? AND FIELDNAME!=?',
+                        (lookup_checktable, 'X', 'MANDT')
+                    ).fetchall():
+                        kf = kf_r['FIELDNAME']
+                        if kf in seen or kf == col:
+                            continue
+                        seen.add(kf)
+                        candidate = conn.execute(
+                            f'SELECT TABNAME FROM "{dd08l_name}" WHERE FIELDNAME=? AND CHECKTABLE=? AND AS4LOCAL=? AND FRKART=?',
+                            (kf, lookup_checktable, 'A', 'TEXT')
+                        ).fetchone()
+                        if candidate and candidate['TABNAME']:
+                            tt_row = candidate
+                            text_key_field = kf
+                            break
+
                 if not tt_row or not tt_row['TABNAME']:
                     col_hints[col] = [f'No text table found for {col} in DD08L']
                     continue
@@ -1295,7 +1328,7 @@ def get_table_data(table):
                     col_hints[col] = [f'Upload DD03L with entries for {checktable} to see {col} descriptions']
                     continue
 
-                col_lookup[col] = {'text_db': text_db, 'key_fields': key_fields, 'text_table': text_table}
+                col_lookup[col] = {'text_db': text_db, 'key_fields': key_fields, 'text_table': text_table, 'text_key_field': text_key_field}
 
         # ── DD07T domain value descriptions (columns without CHECKTABLE) ──
         if dd03l_exists:
@@ -1317,11 +1350,43 @@ def get_table_data(table):
                 else:
                     col_hints[col] = [f'Upload DD07T to see {col} descriptions']
 
-        # ── Build rows with enriched cell values ──
-        desc_cache = {}  # (col, key_vals_tuple) -> str or None
-
+        # ── Prefetch all text table / DD07T data needed for cell descriptions ──
+        # One bulk query per active lookup replaces N per-cell queries (N = distinct values).
         row_keys = set(raw_cols)
 
+        for col, cfg in col_lookup.items():
+            if cfg.get('source') == 'dd07t':
+                rows_dd07t = conn.execute(
+                    f'SELECT DOMVALUE_L, DDTEXT FROM "{cfg["dd07t_db"]}" '
+                    'WHERE DOMNAME=? AND DDLANGUAGE=? AND AS4LOCAL=?',
+                    (cfg['domname'], 'EN', 'A')
+                ).fetchall()
+                cfg['_preload'] = {r['DOMVALUE_L']: (r['DDTEXT'] or '').strip() for r in rows_dd07t}
+                continue
+
+            text_key_field = cfg.get('text_key_field', col)
+            # Deduplicate key_fields while preserving order
+            seen_kfs: set = set()
+            available_kfs = []
+            for kf in cfg['key_fields']:
+                if kf not in seen_kfs and (kf in row_keys or kf == text_key_field):
+                    seen_kfs.add(kf)
+                    available_kfs.append(kf)
+            if not available_kfs:
+                continue
+
+            sel_cols = ', '.join(f'"{kf}"' for kf in available_kfs)
+            preload: dict = {}
+            for r in conn.execute(
+                f'SELECT {sel_cols}, VTEXT FROM "{cfg["text_db"]}" WHERE SPRAS=?', ('EN',)
+            ).fetchall():
+                vtext = (r['VTEXT'] or '').strip()
+                if vtext:
+                    preload[tuple(r[kf] for kf in available_kfs)] = vtext
+            cfg['_preload'] = preload
+            cfg['_available_kfs'] = available_kfs
+
+        # ── Build rows with enriched cell values ──
         def _get_cell_desc(col, row):
             cfg = col_lookup.get(col)
             if not cfg:
@@ -1330,35 +1395,19 @@ def get_table_data(table):
                 val = row[col]
                 if val is None or str(val).strip() == '':
                     return None
-                cache_key = (col, val)
-                if cache_key in desc_cache:
-                    return desc_cache[cache_key]
-                result = conn.execute(
-                    f'SELECT DDTEXT FROM "{cfg["dd07t_db"]}" '
-                    'WHERE DOMNAME=? AND DDLANGUAGE=? AND AS4LOCAL=? AND DOMVALUE_L=?',
-                    (cfg['domname'], 'EN', 'A', str(val))
-                ).fetchone()
-                desc = result['DDTEXT'].strip() if result and result['DDTEXT'] else None
-                desc_cache[cache_key] = desc
-                return desc
-            # Only use key fields that actually exist in the source row
-            available_kfs = [kf for kf in cfg['key_fields'] if kf in row_keys]
+                return cfg['_preload'].get(str(val)) or None
+            available_kfs = cfg.get('_available_kfs')
             if not available_kfs:
                 return None
-            key_vals = tuple(row[kf] for kf in available_kfs)
+            text_key_field = cfg.get('text_key_field', col)
+            def _kf_val(kf):
+                if kf == text_key_field and text_key_field != col:
+                    return row[col]  # e.g. row['RKSCHL'] used as value for KSCHL
+                return row[kf]
+            key_vals = tuple(_kf_val(kf) for kf in available_kfs)
             if any(v is None or str(v).strip() == '' for v in key_vals):
                 return None
-            cache_key = (col, key_vals)
-            if cache_key in desc_cache:
-                return desc_cache[cache_key]
-            placeholders = ' AND '.join(f'"{kf}"=?' for kf in available_kfs)
-            vtext_row = conn.execute(
-                f'SELECT VTEXT FROM "{cfg["text_db"]}" WHERE SPRAS=? AND {placeholders}',
-                ('EN', *key_vals)
-            ).fetchone()
-            desc = vtext_row['VTEXT'].strip() if vtext_row and vtext_row['VTEXT'] else None
-            desc_cache[cache_key] = desc
-            return desc
+            return cfg['_preload'].get(key_vals) or None
 
         dd07t_missing_cols = set()
         rows_out = []
@@ -1380,7 +1429,7 @@ def get_table_data(table):
         for col in dd07t_missing_cols:
             if col not in col_hints:
                 domname = col_lookup[col]['domname']
-                col_hints[col] = [f'Upload DD07T to see all {col} descriptions']
+                col_hints[col] = [f'No domain values defined for {col} ({domname})']
 
         col_text_tables = {
             enriched_col: col_hints[raw_col]

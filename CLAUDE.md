@@ -40,7 +40,7 @@ harness/
 
 ### Backend (server.py)
 
-Flask + `sqlite3`. All API routes require a Bearer token (session stored in `sessions` table). Routes:
+Flask + `sqlite3`. All API routes require a Bearer token (session stored in `sessions` table). Default login: `admin` / `admin`. Routes:
 - `POST /api/auth/login` / `POST /api/auth/logout` / `POST /api/auth/select-customer`
 - `GET /api/tables`, `GET /api/tables/info`, `DELETE /api/tables/<table>`, `GET /api/tables/<table>/data`
 - `POST /api/upload` — multipart Excel upload; filename must match `{TABLE}_{SYSTEM}_{CLIENT}_{DATE}.xlsx`; validates synchronously then starts a background insert thread; returns `{job_id}`
@@ -55,14 +55,6 @@ Flask + `sqlite3`. All API routes require a Bearer token (session stored in `ses
 **Table types**: `master` (DD03L), `basis` (any DD* prefix), `customizing` (everything else). Validation pipelines differ per type.
 
 **System tables** (excluded from all user-table queries): `users`, `sessions`, `_table_meta`, `customers`, `user_customers`, `validation_logs`, `validation_exceptions`, `upload_jobs`. `_table_meta` stores upload metadata (custname, orig_table, system, client, date) keyed by internal table name.
-
-### Running
-
-```bash
-python3 server.py      # http://localhost:5000 — default login: admin / admin
-```
-
-Production: gunicorn (2 workers, timeout 600) behind nginx + Cloudflare.
 
 ## Rules
 
