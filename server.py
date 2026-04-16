@@ -534,6 +534,8 @@ def _stream_xlsx_rows(file_path, n_cols):
                         else:
                             val = cur_val
                         row_cells[col_idx] = val
+                if event == 'end':
+                    el.clear()
 
 
 def init_db():
@@ -645,12 +647,21 @@ def init_db():
 
 
 def _cleanup_stale_uploads():
-    """Remove any leftover temp upload files from a previous crashed run."""
+    """Remove leftover temp files and mark orphaned jobs from a previous crashed run."""
     for path in glob.glob('/tmp/harness_upload_*.xlsx'):
         try:
             os.unlink(path)
         except OSError:
             pass
+    # Any job still pending at startup had its background thread killed — mark as error.
+    try:
+        with get_db() as conn:
+            conn.execute(
+                "UPDATE upload_jobs SET status='error', error='Upload interrupted (server restarted)' "
+                "WHERE status='pending'"
+            )
+    except Exception:
+        pass
 
 
 _cleanup_stale_uploads()
