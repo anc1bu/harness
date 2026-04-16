@@ -333,12 +333,7 @@ function _pollJob(jobId, container, statusEl, fill, label, entry) {
       } else if (job.phase === 'validating') {
         statusEl.textContent = 'Validating…';
         label.textContent = 'Validating…';
-        if (inserted !== lastInserted) { lastInserted = inserted; lastProgress = Date.now(); }
-        if (Date.now() - lastProgress > STALE_MS) {
-          clearInterval(interval);
-          statusEl.textContent = '';
-          toast('Upload timed out during validation. The file may be too large for this server.', 'err');
-        }
+        lastProgress = Date.now(); // no row-level progress during validation — never time out here
 
       } else if (!total) {
         // Background thread still counting rows — keep indeterminate bar

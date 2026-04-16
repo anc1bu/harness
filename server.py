@@ -394,10 +394,11 @@ def _count_xlsx_rows(file_path):
             if not sheet_name:
                 return 0
             with zf.open(sheet_name) as f:
-                row_count = sum(
-                    1 for _, el in iterparse(f, events=['end'])
-                    if el.tag.endswith('}row') or el.tag == 'row'
-                )
+                row_count = 0
+                for _, el in iterparse(f, events=['end']):
+                    if el.tag.endswith('}row') or el.tag == 'row':
+                        row_count += 1
+                    el.clear()
         return max(0, row_count - 1)  # subtract header row
     except Exception:
         return 0
@@ -419,6 +420,7 @@ def _load_shared_strings(zf):
                 el.clear()
             elif event == 'end' and tag == 'si':
                 shared.append(''.join(current_parts))
+                el.clear()
     return shared
 
 
