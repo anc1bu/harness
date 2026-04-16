@@ -166,10 +166,10 @@ function _renderTablesMeta(container, tables, assignments = {}) {
   _fillDraggableTbody(secondaryTbody, secondaryTables, 'secondary',   'No secondary tables',   container);
 }
 
-function _rowHtml(t) {
+function _rowHtml(t, draggable = false) {
   return `
-    <tr class="mt-row" data-table="${t.table}" data-orig-table="${t.orig_table}" style="cursor:pointer;">
-      <td class="mt-name">${t.orig_table}</td>
+    <tr class="mt-row${draggable ? ' mt-draggable' : ''}" data-table="${t.table}" data-orig-table="${t.orig_table}" style="cursor:pointer;" ${draggable ? 'draggable="true"' : ''}>
+      <td class="mt-name">${draggable ? '<span class="mt-drag-handle" title="Drag to move">⠿</span> ' : ''}${t.orig_table}</td>
       <td>${t.system}</td>
       <td>${t.client}</td>
       <td>${t.date}</td>
@@ -191,6 +191,54 @@ function _bindTbody(tbody, container) {
       if (container._tableLoading) return;
       _loadTableData(container, row.dataset.table, row.dataset.origTable);
     });
+  });
+}
+
+function _fillDraggableTbody(tbody, tables, panel, emptyMsg, container) {
+  tbody.innerHTML = tables.length
+    ? tables.map(t => _rowHtml(t, true)).join('')
+    : `<tr><td colspan="6" class="meta-empty">${emptyMsg}</td></tr>`;
+  _bindTbody(tbody, container);
+  _bindDragDrop(tbody, panel, container);
+}
+
+function _bindDragDrop(tbody, panel, container) {
+  const allPanels = () => [
+    container.querySelector('#custom-meta-tbody'),
+    container.querySelector('#secondary-meta-tbody'),
+  ];
+
+  tbody.querySelectorAll('.mt-draggable').forEach(row => {
+    row.addEventListener('dragstart', e => {
+      e.dataTransfer.setData('text/plain', JSON.stringify({
+        origTable: row.dataset.origTable,
+        table:     row.dataset.table,
+        fromPanel: panel,
+      }));
+      row.classList.add('mt-dragging');
+    });
+    row.addEventListener('dragend', () => row.classList.remove('mt-dragging'));
+  });
+
+  tbody.addEventListener('dragover', e => {
+    e.preventDefault();
+    tbody.classList.add('mt-drop-target');
+  });
+  tbody.addEventListener('dragleave', () => tbody.classList.remove('mt-drop-target'));
+
+  tbody.addEventListener('drop', async e => {
+    e.preventDefault();
+    tbody.classList.remove('mt-drop-target');
+    let data;
+    try { data = JSON.parse(e.dataTransfer.getData('text/plain')); } catch { return; }
+    if (data.fromPanel === panel) return;
+
+    try {
+      await api.post('/api/panel-assignments', { orig_table: data.origTable, panel });
+      await _loadTablesMeta(container);
+    } catch (err) {
+      toast(`Failed to save panel assignment: ${err.message}`, 'err');
+    }
   });
 }
 
@@ -217,14 +265,6 @@ function _fillBasisTbody(tbody, tables, container) {
   _bindTbody(tbody, container);
 }
 
-function _fillTbody(tbody, tables, emptyMsg, container) {
-  if (!tables.length) {
-    tbody.innerHTML = `<tr><td colspan="6" class="meta-empty">${emptyMsg}</td></tr>`;
-    return;
-  }
-  tbody.innerHTML = tables.map(_rowHtml).join('');
-  _bindTbody(tbody, container);
-}
 
 async function _deleteTable(container, table) {
   if (!confirm(`Delete table "${table}"? This cannot be undone.`)) return;
@@ -271,6 +311,12 @@ function _fmt(bytes) {
   return `${bytes} B`;
 }
 
+function _setPanelLock(container, locked) {
+  const panelBody = container.querySelector('#panel-control .panel-body');
+  if (!panelBody) return;
+  panelBody.classList.toggle('panel-uploading', locked);
+}
+
 async function _handleFile(file, container, statusEl) {
   if (!_FILENAME_RE.test(file.name)) {
     toast(
@@ -288,6 +334,8 @@ async function _handleFile(file, container, statusEl) {
   label.textContent = 'Uploading file…';
   statusEl.textContent = `Validating ${file.name}…`;
   statusEl.className = 'upload-status';
+
+  _setPanelLock(container, true);
 
   const formData = new FormData();
   formData.append('file', file);
@@ -307,6 +355,7 @@ async function _handleFile(file, container, statusEl) {
 
     _pollJob(result.job_id, container, statusEl, fill, label, entry);
   } catch (err) {
+    _setPanelLock(container, false);
     row.remove();
     await _loadTablesMeta(container);
     statusEl.textContent = '';
@@ -331,6 +380,7 @@ function _pollJob(jobId, container, statusEl, fill, label, entry) {
 
       if (job.status === 'done') {
         clearInterval(interval);
+        _setPanelLock(container, false);
         fill.classList.add('determinate');
         fill.style.width = '100%';
         label.textContent = '100%';
@@ -342,6 +392,7 @@ function _pollJob(jobId, container, statusEl, fill, label, entry) {
 
       } else if (job.status === 'error') {
         clearInterval(interval);
+        _setPanelLock(container, false);
         await _loadTablesMeta(container);
         statusEl.textContent = '';
         toast(`Upload failed: ${job.error}`, 'err');
@@ -381,6 +432,7 @@ function _pollJob(jobId, container, statusEl, fill, label, entry) {
         if (inserted !== lastInserted) { lastInserted = inserted; lastProgress = Date.now(); }
         if (Date.now() - lastProgress > STALE_MS) {
           clearInterval(interval);
+          _setPanelLock(container, false);
           statusEl.textContent = '';
           toast('Upload stalled — no progress in 5 minutes.', 'err');
         }
@@ -388,6 +440,7 @@ function _pollJob(jobId, container, statusEl, fill, label, entry) {
 
     } catch (err) {
       clearInterval(interval);
+      _setPanelLock(container, false);
       statusEl.textContent = '';
       toast(`Status check failed: ${err.message}`, 'err');
     }

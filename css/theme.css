@@ -248,6 +248,14 @@ tbody tr.selected td { background: rgba(137,180,250,0.12); color: var(--accent);
 .meta-table tr:hover td { background: rgba(74,222,128,0.04); }
 .meta-table .mt-name { color: var(--accent2); font-weight: 600; }
 .meta-empty { text-align: center; color: var(--text-dim); padding: 16px; }
+.panel-uploading { pointer-events: none; opacity: 0.45; user-select: none; }
+.mt-draggable { cursor: grab; }
+.mt-draggable:active { cursor: grabbing; }
+.mt-dragging { opacity: 0.4; }
+.mt-drag-handle { color: var(--text-dim); font-size: 13px; cursor: grab; user-select: none; }
+.mt-drop-target tr:not(.mt-dragging) td { background: rgba(137,180,250,0.07); }
+.mt-drop-target { outline: 1px dashed var(--accent); outline-offset: -2px; }
+.mt-row-disabled { opacity: 0.4; pointer-events: none; }
 
 /* ── Avatar dropdown ────────────────────────────────────────────────────── */
 .avatar-wrap { position: relative; }

@@ -1,6 +1,6 @@
 // Data table renderer with per-column Excel-style filtering.
 
-const PREVIEW_LIMIT = 1_000_000;
+const PREVIEW_LIMIT = 5000;
 const MAX_DROPDOWN_VALS = 500;
 
 export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
