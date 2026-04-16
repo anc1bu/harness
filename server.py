@@ -1305,8 +1305,18 @@ def get_table_data(table):
                     if key not in dd08l_map:
                         dd08l_map[key] = r['TABNAME']
 
+            # Self-text-table: source table's own text table (e.g. T685 → T685T via KSCHL)
+            self_text_map: dict = {}  # fieldname -> text_table_name
+            for r in conn.execute(
+                f'SELECT FIELDNAME, TABNAME FROM "{dd08l_name}" '
+                f'WHERE CHECKTABLE=? AND AS4LOCAL=? AND FRKART=?',
+                (orig_table, 'A', 'TEXT')
+            ).fetchall():
+                if r['FIELDNAME'] not in self_text_map:
+                    self_text_map[r['FIELDNAME']] = r['TABNAME']
+
             # Bulk key fields: all KEYFLAG='X' fields for all relevant tables
-            all_tables_needed = list(set(unique_cts) | set(unique_lookup_cts))
+            all_tables_needed = list(set(unique_cts) | set(unique_lookup_cts) | ({orig_table} if self_text_map else set()))
             kf_map: dict = {}   # tabname -> [fieldnames]
             if all_tables_needed:
                 ph = ','.join('?' * len(all_tables_needed))
@@ -1318,10 +1328,8 @@ def get_table_data(table):
                     kf_map.setdefault(r['TABNAME'], []).append(r['FIELDNAME'])
 
             # Bulk existence check for all candidate text tables
-            potential_text_dbs = {
-                f'{custname}_{system}_{tt}'
-                for tt in dd08l_map.values() if tt
-            }
+            all_text_table_names = list(set(list(dd08l_map.values()) + list(self_text_map.values())))
+            potential_text_dbs = {f'{custname}_{system}_{tt}' for tt in all_text_table_names if tt}
             existing_tables: set = set()
             if potential_text_dbs:
                 ph = ','.join('?' * len(potential_text_dbs))
@@ -1331,6 +1339,20 @@ def get_table_data(table):
                         ('table', *potential_text_dbs)
                     ).fetchall()
                 }
+
+            # Bulk-fetch the text field name for each text table from DD03L
+            # Text field = the non-key, non-language field (KEYFLAG!='X', not MANDT/SPRAS/LANGU)
+            text_field_map: dict = {}  # text_table_name -> fieldname
+            if all_text_table_names:
+                ph = ','.join('?' * len(all_text_table_names))
+                for r in conn.execute(
+                    f'SELECT TABNAME, FIELDNAME FROM "{dd03l_name}" '
+                    f'WHERE TABNAME IN ({ph}) AND (KEYFLAG IS NULL OR KEYFLAG=?) '
+                    f'AND FIELDNAME NOT IN (?,?,?)',
+                    (*all_text_table_names, '', 'MANDT', 'SPRAS', 'LANGU')
+                ).fetchall():
+                    if r['TABNAME'] not in text_field_map:
+                        text_field_map[r['TABNAME']] = r['FIELDNAME']
 
             # Build col_lookup from prefetched dicts (no more per-column DB queries)
             for col in raw_cols:
@@ -1366,9 +1388,35 @@ def get_table_data(table):
                     col_hints[col] = [f'Upload DD03L with entries for {checktable} to see {col} descriptions']
                     continue
 
+                text_field = text_field_map.get(tt)
+                if not text_field:
+                    col_hints[col] = [f'No text field found in DD03L for {tt}']
+                    continue
+
                 col_lookup[col] = {
                     'text_db': text_db, 'key_fields': key_fields,
                     'text_table': tt,   'text_key_field': text_key_field,
+                    'text_field': text_field,
+                }
+
+            # Self-text-table enrichment (e.g. T685.KSCHL → T685T)
+            for field, tt in self_text_map.items():
+                if field not in raw_cols or field in col_lookup or field in col_hints:
+                    continue
+                text_db = f'{custname}_{system}_{tt}'
+                if text_db not in existing_tables:
+                    col_hints[field] = [f'Upload {tt} to see {field} descriptions']
+                    continue
+                key_fields = kf_map.get(orig_table, [])
+                if not key_fields:
+                    continue
+                text_field = text_field_map.get(tt)
+                if not text_field:
+                    continue
+                col_lookup[field] = {
+                    'text_db': text_db, 'key_fields': key_fields,
+                    'text_table': tt,   'text_key_field': field,
+                    'text_field': text_field,
                 }
 
         # ── DD07T domain value descriptions — reuse src_dd03l (no extra queries) ──
@@ -1401,22 +1449,24 @@ def get_table_data(table):
                 continue
 
             text_key_field = cfg.get('text_key_field', col)
-            # Deduplicate key_fields while preserving order
+            text_db_cols = {r[1] for r in conn.execute(f'PRAGMA table_info("{cfg["text_db"]}")')}
+            # Deduplicate key_fields while preserving order; skip cols absent from text_db
             seen_kfs: set = set()
             available_kfs = []
             for kf in cfg['key_fields']:
-                if kf not in seen_kfs and (kf in row_keys or kf == text_key_field):
+                if kf not in seen_kfs and kf in text_db_cols and (kf in row_keys or kf == text_key_field):
                     seen_kfs.add(kf)
                     available_kfs.append(kf)
-            if not available_kfs:
+            text_field = cfg['text_field']
+            if not available_kfs or text_field not in text_db_cols:
                 continue
 
             sel_cols = ', '.join(f'"{kf}"' for kf in available_kfs)
             preload: dict = {}
             for r in conn.execute(
-                f'SELECT {sel_cols}, VTEXT FROM "{cfg["text_db"]}" WHERE SPRAS=?', ('EN',)
+                f'SELECT {sel_cols}, "{text_field}" FROM "{cfg["text_db"]}" WHERE SPRAS=?', ('EN',)
             ).fetchall():
-                vtext = (r['VTEXT'] or '').strip()
+                vtext = (r[text_field] or '').strip()
                 if vtext:
                     preload[tuple(r[kf] for kf in available_kfs)] = vtext
             cfg['_preload'] = preload
