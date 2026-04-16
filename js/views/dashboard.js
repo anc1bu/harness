@@ -299,6 +299,10 @@ async function _handleFile(file, container, statusEl) {
 }
 
 function _pollJob(jobId, container, statusEl, fill, label, entry) {
+  let lastProgress = Date.now();
+  let lastInserted = -1;
+  const STALE_MS = 5 * 60 * 1000; // 5 minutes without progress → give up
+
   const interval = setInterval(async () => {
     if (!container.querySelector('#drop-zone')) {
       clearInterval(interval);
@@ -326,13 +330,22 @@ function _pollJob(jobId, container, statusEl, fill, label, entry) {
         statusEl.textContent = '';
         toast(`Upload failed: ${job.error}`, 'err');
 
+      } else if (job.phase === 'validating') {
+        statusEl.textContent = 'Validating…';
+        label.textContent = 'Validating…';
+        if (inserted !== lastInserted) { lastInserted = inserted; lastProgress = Date.now(); }
+        if (Date.now() - lastProgress > STALE_MS) {
+          clearInterval(interval);
+          statusEl.textContent = '';
+          toast('Upload timed out during validation. The file may be too large for this server.', 'err');
+        }
+
       } else if (!total) {
         // Background thread still counting rows — keep indeterminate bar
         statusEl.textContent = 'Counting rows…';
         label.textContent = 'Counting rows…';
 
       } else if (job.phase === 'sorting') {
-        // All rows inserted — DD03L sort running on server
         fill.classList.add('determinate');
         fill.style.width = '100%';
         label.textContent = '100%';
@@ -340,21 +353,26 @@ function _pollJob(jobId, container, statusEl, fill, label, entry) {
         statusEl.textContent = 'Sorting table…';
 
       } else if (inserted === 0) {
-        // Row count known, inserts not started yet
         fill.classList.add('determinate');
         fill.style.width = '0%';
         label.textContent = '0%';
         entry.textContent = `0 / ${total.toLocaleString()}`;
         statusEl.textContent = `Inserting ${total.toLocaleString()} rows into database…`;
+        if (inserted !== lastInserted) { lastInserted = inserted; lastProgress = Date.now(); }
 
       } else {
-        // Inserting in progress
         const pct = Math.min(100, Math.round((inserted / total) * 100));
         fill.classList.add('determinate');
         fill.style.width = `${pct}%`;
         label.textContent = `${pct}%`;
         entry.textContent = `${inserted.toLocaleString()} / ${total.toLocaleString()}`;
         statusEl.textContent = `Inserting… ${pct}%`;
+        if (inserted !== lastInserted) { lastInserted = inserted; lastProgress = Date.now(); }
+        if (Date.now() - lastProgress > STALE_MS) {
+          clearInterval(interval);
+          statusEl.textContent = '';
+          toast('Upload stalled — no progress in 5 minutes.', 'err');
+        }
       }
 
     } catch (err) {

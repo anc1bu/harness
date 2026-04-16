@@ -121,14 +121,17 @@ def _v4_self_ref_columns(ctx):
     all_tabnames = ctx.get('all_tabnames', set())
     if all_tabnames != {'DD03L'}:
         return None
-    fieldname_idx = headers.index('FIELDNAME')
-    rollname_idx  = headers.index('ROLLNAME') if 'ROLLNAME' in headers else None
-    fieldname_vals = {
-        str(r[fieldname_idx]).strip()
-        for r in data_rows
-        if r[fieldname_idx] is not None
-        and (rollname_idx is None or (r[rollname_idx] is not None and str(r[rollname_idx]).strip() != ''))
-    }
+    if '_fieldname_vals' in ctx:
+        fieldname_vals = ctx['_fieldname_vals']
+    else:
+        fieldname_idx = headers.index('FIELDNAME')
+        rollname_idx  = headers.index('ROLLNAME') if 'ROLLNAME' in headers else None
+        fieldname_vals = {
+            str(r[fieldname_idx]).strip()
+            for r in data_rows
+            if r[fieldname_idx] is not None
+            and (rollname_idx is None or (r[rollname_idx] is not None and str(r[rollname_idx]).strip() != ''))
+        }
     headers_set = set(headers)
     extra   = sorted(headers_set - fieldname_vals)
     missing = sorted(fieldname_vals - headers_set)
@@ -373,7 +376,7 @@ def _batched(iterable, n):
         yield batch
 
 
-def _count_xlsx_rows(file_bytes):
+def _count_xlsx_rows(file_path):
     """Count data rows in an XLSX without openpyxl.
 
     Scans <row> elements in the sheet XML inside the ZIP directly.
@@ -381,7 +384,7 @@ def _count_xlsx_rows(file_bytes):
     Returns row count excluding the header row.
     """
     try:
-        with zipfile.ZipFile(BytesIO(file_bytes)) as zf:
+        with zipfile.ZipFile(file_path) as zf:
             # Find the first worksheet (xl/worksheets/sheet1.xml is standard)
             sheet_name = next(
                 (n for n in zf.namelist() if re.match(r'xl/worksheets/sheet\d+\.xml', n)),
@@ -480,13 +483,13 @@ def _read_xlsx_headers(file_bytes):
         return None, f'Cannot read Excel file: {e}'
 
 
-def _stream_xlsx_rows(file_bytes, n_cols):
+def _stream_xlsx_rows(file_path, n_cols):
     """Stream data rows from an XLSX using ZIP/XML — no openpyxl, constant memory.
 
     Yields each data row (after the header) as a list of n_cols values (str or None).
     Handles sparse rows: missing cells are yielded as None.
     """
-    with zipfile.ZipFile(BytesIO(file_bytes)) as zf:
+    with zipfile.ZipFile(file_path) as zf:
         shared = _load_shared_strings(zf)
         sheet_name = next(
             (n for n in zf.namelist() if re.match(r'xl/worksheets/sheet\d+\.xml', n)),
@@ -603,6 +606,7 @@ def init_db():
         'ALTER TABLE sessions ADD COLUMN custname TEXT',
         'ALTER TABLE _table_meta ADD COLUMN custname TEXT',
         'ALTER TABLE _table_meta ADD COLUMN orig_table TEXT',
+        'ALTER TABLE _table_meta ADD COLUMN row_count INTEGER',
         '''CREATE TABLE IF NOT EXISTS upload_jobs (
             job_id         TEXT PRIMARY KEY,
             custname       TEXT NOT NULL,
@@ -790,25 +794,18 @@ def list_tables_info():
         return jsonify([])
     with get_db() as conn:
         meta = conn.execute(
-            'SELECT table_name, orig_table, system, client, date FROM _table_meta '
+            'SELECT table_name, orig_table, system, client, date, row_count FROM _table_meta '
             'WHERE custname = ? ORDER BY orig_table',
             (custname,)
         ).fetchall()
-        result = []
-        for r in meta:
-            try:
-                count = conn.execute(f'SELECT COUNT(*) FROM "{r["table_name"]}"').fetchone()[0]
-            except Exception:
-                count = 0
-            result.append({
-                'table':      r['table_name'],
-                'orig_table': r['orig_table'] or r['table_name'],
-                'system':     r['system'],
-                'client':     r['client'],
-                'date':       r['date'],
-                'count':      count,
-            })
-    return jsonify(result)
+    return jsonify([{
+        'table':      r['table_name'],
+        'orig_table': r['orig_table'] or r['table_name'],
+        'system':     r['system'],
+        'client':     r['client'],
+        'date':       r['date'],
+        'count':      r['row_count'] or 0,
+    } for r in meta])
 
 
 @app.delete('/api/tables/<table>')
@@ -1066,6 +1063,10 @@ def _bg_insert(job_id, custname, file_bytes, headers, data_rows,
             conn.execute(
                 'UPDATE upload_jobs SET status=?, rows_inserted=?, orig_table=?, table_name=?, table_type=? WHERE job_id=?',
                 ('done', rows_inserted, table_name, db_table_name, table_type, job_id)
+            )
+            conn.execute(
+                'UPDATE _table_meta SET row_count=? WHERE table_name=?',
+                (rows_inserted, db_table_name)
             )
 
     except Exception as e:
