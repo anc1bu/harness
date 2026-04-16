@@ -91,6 +91,7 @@ function _html() {
           <div class="upload-status" id="upload-status"></div>
 
           ${_tableSection('custom-tables-wrap', 'Customizing Tables', 'custom-meta-tbody')}
+          ${_tableSection('secondary-tables-wrap', 'Secondary Tables', 'secondary-meta-tbody')}
           ${_tableSection('basis-tables-wrap', 'Basis Tables', 'basis-meta-tbody')}
 
         </div>
@@ -139,22 +140,30 @@ function _startClock(container) {
 
 async function _loadTablesMeta(container) {
   try {
-    const tables = await api.get('/api/tables/info');
-    _renderTablesMeta(container, tables);
+    const [tables, assignments] = await Promise.all([
+      api.get('/api/tables/info'),
+      api.get('/api/panel-assignments'),
+    ]);
+    _renderTablesMeta(container, tables, assignments);
   } catch (err) {
     toast(`Failed to load tables: ${err.message}`, 'err');
   }
 }
 
-function _renderTablesMeta(container, tables) {
-  const basisTbody  = container.querySelector('#basis-meta-tbody');
-  const customTbody = container.querySelector('#custom-meta-tbody');
+function _renderTablesMeta(container, tables, assignments = {}) {
+  const basisTbody     = container.querySelector('#basis-meta-tbody');
+  const customTbody    = container.querySelector('#custom-meta-tbody');
+  const secondaryTbody = container.querySelector('#secondary-meta-tbody');
 
-  const basisTables  = tables.filter(t => ['master', 'basis'].includes(_classifyTable(t.orig_table)));
-  const customTables = tables.filter(t => _classifyTable(t.orig_table) === 'customizing');
+  const basisTables     = tables.filter(t => ['master', 'basis'].includes(_classifyTable(t.orig_table)));
+  const customizingAll  = tables.filter(t => _classifyTable(t.orig_table) === 'customizing');
+
+  const customTables    = customizingAll.filter(t => (assignments[t.orig_table] || 'customizing') === 'customizing');
+  const secondaryTables = customizingAll.filter(t => assignments[t.orig_table] === 'secondary');
 
   _fillBasisTbody(basisTbody, basisTables, container);
-  _fillTbody(customTbody, customTables, 'No customizing tables', container);
+  _fillDraggableTbody(customTbody,    customTables,    'customizing', 'No customizing tables', container);
+  _fillDraggableTbody(secondaryTbody, secondaryTables, 'secondary',   'No secondary tables',   container);
 }
 
 function _rowHtml(t) {
@@ -185,20 +194,24 @@ function _bindTbody(tbody, container) {
   });
 }
 
+const _EXPECTED_BASIS = ['DD03L', 'DD04T', 'DD07T', 'DD08L'];
+
 function _fillBasisTbody(tbody, tables, container) {
-  const hasDd03l = tables.some(t => t.orig_table.toUpperCase() === 'DD03L');
+  const uploaded = new Set(tables.map(t => t.orig_table.toUpperCase()));
   let html = tables.map(_rowHtml).join('');
-  if (!hasDd03l) {
-    html += `
-      <tr class="mt-dd03l-placeholder">
-        <td class="mt-name" style="color:var(--text-dim)">DD03L</td>
-        <td style="color:var(--text-dim)">—</td>
-        <td style="color:var(--text-dim)">—</td>
-        <td style="color:var(--text-dim)">—</td>
-        <td style="color:var(--text-dim)">—</td>
-        <td style="color:var(--text-dim);font-size:10px;letter-spacing:1px;">NOT UPLOADED</td>
-      </tr>
-    `;
+  for (const name of _EXPECTED_BASIS) {
+    if (!uploaded.has(name)) {
+      html += `
+        <tr>
+          <td class="mt-name" style="color:var(--text-dim)">${name}</td>
+          <td style="color:var(--text-dim)">—</td>
+          <td style="color:var(--text-dim)">—</td>
+          <td style="color:var(--text-dim)">—</td>
+          <td style="color:var(--text-dim)">—</td>
+          <td style="color:var(--text-dim);font-size:10px;letter-spacing:1px;">NOT UPLOADED</td>
+        </tr>
+      `;
+    }
   }
   tbody.innerHTML = html;
   _bindTbody(tbody, container);

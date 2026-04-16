@@ -606,6 +606,13 @@ def init_db():
             error          TEXT,
             created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS panel_assignments (
+            user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            custname   TEXT    NOT NULL,
+            orig_table TEXT    NOT NULL,
+            panel      TEXT    NOT NULL DEFAULT 'customizing',
+            PRIMARY KEY (user_id, custname, orig_table)
+        );
     ''')
 
     # Schema migrations for existing DBs (idempotent)
@@ -629,6 +636,13 @@ def init_db():
         )''',
         'ALTER TABLE upload_jobs ADD COLUMN total_rows INTEGER',
         'ALTER TABLE upload_jobs ADD COLUMN phase TEXT',
+        '''CREATE TABLE IF NOT EXISTS panel_assignments (
+            user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            custname   TEXT    NOT NULL,
+            orig_table TEXT    NOT NULL,
+            panel      TEXT    NOT NULL DEFAULT 'customizing',
+            PRIMARY KEY (user_id, custname, orig_table)
+        )''',
     ]:
         try:
             conn.execute(sql)
@@ -801,6 +815,14 @@ def _session_custname():
     return session['custname'] if session else None
 
 
+def _session_user_id():
+    with get_db() as conn:
+        session = conn.execute(
+            'SELECT user_id FROM sessions WHERE token = ?', (_get_token(),)
+        ).fetchone()
+    return session['user_id'] if session else None
+
+
 @app.get('/api/tables')
 @require_auth
 def list_tables():
@@ -850,6 +872,39 @@ def drop_table(table):
             return jsonify({'error': 'Table not found'}), 404
         conn.execute(f'DROP TABLE IF EXISTS "{table}"')
         conn.execute('DELETE FROM _table_meta WHERE table_name = ?', (table,))
+    return jsonify({'ok': True})
+
+
+# ── Panel assignments ──────────────────────────────────────────────────────
+
+@app.get('/api/panel-assignments')
+@require_auth
+def get_panel_assignments():
+    user_id  = _session_user_id()
+    custname = _session_custname()
+    with get_db() as conn:
+        rows = conn.execute(
+            'SELECT orig_table, panel FROM panel_assignments WHERE user_id=? AND custname=?',
+            (user_id, custname)
+        ).fetchall()
+    return jsonify({r['orig_table']: r['panel'] for r in rows})
+
+
+@app.post('/api/panel-assignments')
+@require_auth
+def set_panel_assignment():
+    user_id  = _session_user_id()
+    custname = _session_custname()
+    data     = request.json or {}
+    orig_table = data.get('orig_table', '').strip()
+    panel      = data.get('panel', '').strip()
+    if not orig_table or panel not in ('customizing', 'secondary'):
+        return jsonify({'error': 'Invalid payload'}), 400
+    with get_db() as conn:
+        conn.execute(
+            'INSERT OR REPLACE INTO panel_assignments (user_id, custname, orig_table, panel) VALUES (?,?,?,?)',
+            (user_id, custname, orig_table, panel)
+        )
     return jsonify({'ok': True})
 
 
