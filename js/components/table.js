@@ -164,7 +164,7 @@ export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
     const selected = activeFilters.get(col) || new Set();
 
     const matchVals  = searchText
-      ? allVals.filter(v => v.toLowerCase().includes(searchText.toLowerCase()))
+      ? allVals.filter(v => _matchesPattern(v, searchText))
       : allVals;
     const visible  = matchVals.slice(0, MAX_DROPDOWN_VALS);
     const hasMore  = matchVals.length > MAX_DROPDOWN_VALS;
@@ -212,17 +212,26 @@ export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
     _isSearchTyping = false;
 
     // ── Bind dropdown events ───────────────────────────────────────────────
+    searchInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { _closeDropdown(); return; }
+    });
+
     searchInput.addEventListener('input', e => {
       _isSearchTyping = true;
       const text = e.target.value;
       filterTr.querySelector(`.tbl-filter-input[data-col="${col}"]`).value = text;
+      // Auto-select all values that match the typed pattern
+      const matching = allVals.filter(v => _matchesPattern(v, text));
+      if (text && matching.length) activeFilters.set(col, new Set(matching));
+      else activeFilters.delete(col);
+      _renderRows();
       _renderDropdown(col, anchorEl, text, false);
     });
 
     dropdown.querySelector('.tfd-check-all').addEventListener('change', e => {
       const text = dropdown.querySelector('.tfd-search').value;
       const vis  = text
-        ? allVals.filter(v => v.toLowerCase().includes(text.toLowerCase()))
+        ? allVals.filter(v => _matchesPattern(v, text))
         : allVals;
       const sel  = new Set(activeFilters.get(col) || []);
       if (e.target.checked) vis.forEach(v => sel.add(v));
@@ -274,8 +283,19 @@ export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
   // Filter input row
   filterTr.querySelectorAll('.tbl-filter-input').forEach(inp => {
     const col = inp.dataset.col;
-    inp.addEventListener('focus', ()  => _openDropdown(col, inp.parentElement, inp.value, false));
-    inp.addEventListener('input', e   => _openDropdown(col, inp.parentElement, e.target.value, false));
+    inp.addEventListener('focus', () => _openDropdown(col, inp.parentElement, inp.value, false));
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { _closeDropdown(); inp.blur(); }
+    });
+    inp.addEventListener('input', e => {
+      const text = e.target.value;
+      // Auto-select all values that match the typed pattern
+      const matching = uniqueVals.get(col).filter(v => _matchesPattern(v, text));
+      if (text && matching.length) activeFilters.set(col, new Set(matching));
+      else activeFilters.delete(col);
+      _renderRows();
+      _openDropdown(col, inp.parentElement, text, false);
+    });
   });
 
   // Column header filter buttons
@@ -376,6 +396,17 @@ export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
 
 function _esc(str) {
   return str.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function _matchesPattern(value, pattern) {
+  if (!pattern) return true;
+  if (pattern.includes('*')) {
+    // Wildcard mode: * matches any sequence of characters
+    const escaped = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    const regexStr = escaped.replace(/\*/g, '.*');
+    try { return new RegExp(`^${regexStr}$`, 'i').test(value); } catch { return false; }
+  }
+  return value.toLowerCase().includes(pattern.toLowerCase());
 }
 
 function _toCsv(rows, cols) {

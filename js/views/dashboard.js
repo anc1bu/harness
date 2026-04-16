@@ -423,7 +423,7 @@ async function _loadTableData(container, table, origTable) {
 
     // V-Show-1b: DD08L missing or empty → error, do not show
     if (data.dd08l_missing) {
-      toast('pls upload DD08L table', 'err');
+      toast(`Pls upload DD08L table WHERE TABNAME = '${origTable}' AND FRKART = 'TEXT'`, 'err');
       return;
     }
 

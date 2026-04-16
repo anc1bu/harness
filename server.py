@@ -1114,14 +1114,14 @@ def get_table_data(table):
         dd04t_count = conn.execute(f'SELECT COUNT(*) FROM "{dd04t_name}"').fetchone()[0] if dd04t_exists else 0
         dd04t_missing = not dd04t_exists or dd04t_count == 0
 
-        # Check DD08L existence and records for the viewed table
+        # Check DD08L existence and whether it has any FRKART='TEXT' entries at all
         dd08l_exists_check = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (dd08l_name,)
         ).fetchone()
-        dd08l_count = conn.execute(
-            f'SELECT COUNT(*) FROM "{dd08l_name}" WHERE TABNAME=?', (orig_table.upper(),)
+        dd08l_text_count = conn.execute(
+            f'SELECT COUNT(*) FROM "{dd08l_name}" WHERE FRKART=?', ('TEXT',)
         ).fetchone()[0] if dd08l_exists_check else 0
-        dd08l_missing = not dd08l_exists_check or dd08l_count == 0
+        dd08l_missing = not dd08l_exists_check or dd08l_text_count == 0
 
         # Build enriched headers
         enriched_cols = []
@@ -1201,9 +1201,19 @@ def get_table_data(table):
                     continue
                 checktable = ct_row['CHECKTABLE'].strip()
 
+                # Resolve chain one level: e.g. T685A.KAPPL → T681Z → T681A
+                # so the DD08L TEXT lookup uses the actual key table (T681A), not the
+                # intermediate check table (T681Z), and correctly finds T681B.
+                next_ct_row = conn.execute(
+                    f'SELECT CHECKTABLE FROM "{dd03l_name}" WHERE TABNAME=? AND FIELDNAME=?',
+                    (checktable, col)
+                ).fetchone()
+                next_checktable = (next_ct_row['CHECKTABLE'] or '').strip() if next_ct_row else ''
+                lookup_checktable = next_checktable if next_checktable and next_checktable != '*' else checktable
+
                 tt_row = conn.execute(
                     f'SELECT TABNAME FROM "{dd08l_name}" WHERE FIELDNAME=? AND CHECKTABLE=? AND AS4LOCAL=? AND FRKART=?',
-                    (col, checktable, 'A', 'TEXT')
+                    (col, lookup_checktable, 'A', 'TEXT')
                 ).fetchone()
                 if not tt_row or not tt_row['TABNAME']:
                     col_hints[col] = [
