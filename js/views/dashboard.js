@@ -421,11 +421,7 @@ async function _loadTableData(container, table, origTable) {
       return;
     }
 
-    // V-Show-1b: DD08L missing or empty → error, do not show
-    if (data.dd08l_missing) {
-      toast(`Pls upload DD08L table WHERE TABNAME = '${origTable}' AND FRKART = 'TEXT'`, 'err');
-      return;
-    }
+
 
     // V-Show-2: DD04T exists but some descriptions missing → warning, still show
     if (data.partial_descriptions) {

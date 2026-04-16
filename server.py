@@ -883,47 +883,44 @@ def upload_excel():
     if not headers:
         return jsonify({'error': 'Excel file has no columns'}), 422
 
-    # For master tables, load data_rows now — needed for V3/V4 validation.
-    # Master files (DD03L) are small so openpyxl is fine here.
-    # For basis/customizing, data_rows are not needed for validation.
+    # ── Step 2: Run header-only validations synchronously ────────────────────
+    # For master tables (DD03L), V3/V4/V5 require streaming all data rows which
+    # can take minutes on large files and causes Cloudflare 524 timeouts.
+    # Run only V1+V2 (header-only) here; V3/V4/V5 run in the background thread.
+    # For basis/customizing, all validations need only headers or DB — run them here.
     if table_type == 'master':
-        try:
-            wb = openpyxl.load_workbook(BytesIO(file_bytes), read_only=True, data_only=True)
-        except Exception as e:
-            return jsonify({'error': f'Cannot read Excel file: {e}'}), 422
-        ws = wb.active
-        rows_iter = ws.iter_rows(values_only=True)
-        next(rows_iter)  # skip header
-        data_rows = list(rows_iter)
-        wb.close()
+        sync_steps = [_v1_technical_headers, _v2_required_cols]
     else:
-        data_rows = []
+        sync_steps = _VALIDATION_PIPELINE.get(table_type, [])
 
-    # ── Step 2: Run validation pipeline ───────────────────────────────────────
-    vr = _run_validations(table_name, headers, data_rows, table_type, dd03l_db_name)
-    if vr:
-        with get_db() as conn:
-            _log_val_fields(conn, custname, vr.code, table_name, vr.fields)
-            if vr.code in _EXCEPTION_VALIDATIONS and vr.fields:
-                # Exception check only applies when there are specific fields to except
-                exceptions = _get_exceptions(conn, custname, vr.code, table_name)
-                remaining  = [f for f in vr.fields if f['name'] not in exceptions]
-                if remaining:
-                    extra   = [f['name'] for f in remaining if f.get('note') == 'extra']
-                    missing = [f['name'] for f in remaining if f.get('note') == 'missing']
-                    t = f'[{table_type}]'
-                    parts = []
-                    if vr.code == 'V9':
-                        if extra:   parts.append(f'extra in Excel: {", ".join(extra[:5])}{"  …" if len(extra) > 5 else ""}')
-                        if missing: parts.append(f'missing from Excel: {", ".join(missing[:5])}{"  …" if len(missing) > 5 else ""}')
-                    else:
-                        if extra:   parts.append(f'extra columns: {", ".join(extra[:5])}{"  …" if len(extra) > 5 else ""}')
-                        if missing: parts.append(f'missing columns: {", ".join(missing[:5])}{"  …" if len(missing) > 5 else ""}')
-                    return jsonify({'error': f'[{vr.code}]{t} {table_name}: {"; ".join(parts)}'}), 422
-                # all fields excepted — fall through and proceed with upload
-            else:
-                # Hard block: prerequisite failures (empty fields) or non-exceptionable validations
-                return jsonify({'error': vr.error}), 422
+    data_rows = []  # master: loaded in background; basis/customizing: not needed for sync validation
+    sync_ctx = {
+        'table_name': table_name, 'table_type': table_type,
+        'dd03l_db_name': dd03l_db_name, 'headers': headers, 'data_rows': data_rows,
+    }
+    for step in sync_steps:
+        vr = step(sync_ctx)
+        if vr:
+            with get_db() as conn:
+                _log_val_fields(conn, custname, vr.code, table_name, vr.fields)
+                if vr.code in _EXCEPTION_VALIDATIONS and vr.fields:
+                    exceptions = _get_exceptions(conn, custname, vr.code, table_name)
+                    remaining  = [f for f in vr.fields if f['name'] not in exceptions]
+                    if remaining:
+                        extra   = [f['name'] for f in remaining if f.get('note') == 'extra']
+                        missing = [f['name'] for f in remaining if f.get('note') == 'missing']
+                        t = f'[{table_type}]'
+                        parts = []
+                        if vr.code == 'V9':
+                            if extra:   parts.append(f'extra in Excel: {", ".join(extra[:5])}{"  …" if len(extra) > 5 else ""}')
+                            if missing: parts.append(f'missing from Excel: {", ".join(missing[:5])}{"  …" if len(missing) > 5 else ""}')
+                        else:
+                            if extra:   parts.append(f'extra columns: {", ".join(extra[:5])}{"  …" if len(extra) > 5 else ""}')
+                            if missing: parts.append(f'missing columns: {", ".join(missing[:5])}{"  …" if len(missing) > 5 else ""}')
+                        return jsonify({'error': f'[{vr.code}]{t} {table_name}: {"; ".join(parts)}'}), 422
+                    # all fields excepted — fall through
+                else:
+                    return jsonify({'error': vr.error}), 422
 
     # ── Step 3: Create job, start background insert ──────────────────────────
     # total_rows is counted inside the background thread to avoid blocking the
@@ -947,31 +944,51 @@ def upload_excel():
 
 def _bg_insert(job_id, custname, file_bytes, headers, data_rows,
                table_name, db_table_name, dd03l_db_name, table_type, system, client, date):
-    """Background thread: count rows, then insert into SQLite and update job status."""
+    """Background thread: validate (master only), count rows, insert into SQLite."""
     try:
         n = len(headers)
 
-        # ── Count total rows first so the frontend can show a determinate bar ──
-        # For basis/customizing, scan raw ZIP/XML to count <row> elements instead
-        # of using openpyxl — openpyxl holds ~900 MB RAM for a 46 MB XLSX and takes
-        # several minutes, starving the gunicorn worker and causing 524 timeouts.
-        if table_type == 'master':
-            total_rows = len(data_rows)
-        else:
-            total_rows = _count_xlsx_rows(file_bytes)
-        with get_db() as conn:
-            conn.execute('UPDATE upload_jobs SET total_rows=? WHERE job_id=?', (total_rows, job_id))
-
-        # ── Determine key fields ───────────────────────────────────────────────
+        # ── For master tables: one streaming scan for V3/V4/V5 validation + key_fields ──
+        # Never materialise all rows into a list — 58 MB XLSX = ~750 MB XML = OOM.
+        # Collect only the tiny metadata needed (TABNAME, FIELDNAME, KEYFLAG, ROLLNAME).
         key_fields = set()
         if table_type == 'master':
-            keyflag_idx   = headers.index('KEYFLAG')   if 'KEYFLAG'   in headers else None
+            with get_db() as conn:
+                conn.execute('UPDATE upload_jobs SET phase=? WHERE job_id=?', ('validating', job_id))
+
+            tabname_idx   = headers.index('TABNAME')   if 'TABNAME'   in headers else None
             fieldname_idx = headers.index('FIELDNAME') if 'FIELDNAME' in headers else None
-            if keyflag_idx is not None and fieldname_idx is not None:
-                for row in data_rows:
-                    if (len(row) > keyflag_idx and str(row[keyflag_idx] or '').strip().upper() == 'X'
-                            and len(row) > fieldname_idx and row[fieldname_idx] is not None):
-                        key_fields.add(str(row[fieldname_idx]).strip())
+            keyflag_idx   = headers.index('KEYFLAG')   if 'KEYFLAG'   in headers else None
+            rollname_idx  = headers.index('ROLLNAME')  if 'ROLLNAME'  in headers else None
+
+            all_tabnames      = set()
+            dd03l_fieldnames  = set()  # FIELDNAME values with non-empty ROLLNAME (for V4)
+
+            for row in _stream_xlsx_rows(file_bytes, n):
+                tab = str(row[tabname_idx]).strip().upper()  if tabname_idx   is not None and row[tabname_idx]   else None
+                fld = str(row[fieldname_idx]).strip()        if fieldname_idx is not None and row[fieldname_idx] else None
+                flg = str(row[keyflag_idx]).strip().upper()  if keyflag_idx   is not None and row[keyflag_idx]   else None
+                rol = str(row[rollname_idx]).strip()         if rollname_idx  is not None and row[rollname_idx]  else None
+                if tab: all_tabnames.add(tab)
+                if fld and rol: dd03l_fieldnames.add(fld)
+                if flg == 'X' and fld: key_fields.add(fld)
+
+            bg_ctx = {
+                'table_name':    table_name,   'table_type':    table_type,
+                'dd03l_db_name': dd03l_db_name, 'headers':       headers,
+                'data_rows':     [],            'all_tabnames':  all_tabnames,
+                '_fieldname_vals': dd03l_fieldnames,
+            }
+            for step in [_v3_no_mixed_tabnames, _v4_self_ref_columns, _v5_non_self_ref_columns]:
+                vr = step(bg_ctx)
+                if vr:
+                    with get_db() as conn:
+                        _log_val_fields(conn, custname, vr.code, table_name, vr.fields)
+                        conn.execute(
+                            'UPDATE upload_jobs SET status=?, error=? WHERE job_id=?',
+                            ('error', vr.error, job_id)
+                        )
+                    return
         else:
             with get_db() as conn:
                 rows = conn.execute(
@@ -979,6 +996,11 @@ def _bg_insert(job_id, custname, file_bytes, headers, data_rows,
                     (table_name.upper(),)
                 ).fetchall()
                 key_fields = {r[0].strip() for r in rows if r[0] is not None}
+
+        # ── Count total rows so the frontend can show a determinate progress bar ──
+        total_rows = _count_xlsx_rows(file_bytes)
+        with get_db() as conn:
+            conn.execute('UPDATE upload_jobs SET total_rows=? WHERE job_id=?', (total_rows, job_id))
 
         # ── Build column definitions ───────────────────────────────────────────
         def _col_def(h):
@@ -995,18 +1017,12 @@ def _bg_insert(job_id, custname, file_bytes, headers, data_rows,
         col_names    = ', '.join(f'"{h}"' for h in headers)
         placeholders = ', '.join('?' for _ in headers)
 
-        # ── Row source: stream from file for basis/customizing, use cached rows for master ──
+        # ── Row source: stream for all table types — never hold all rows in RAM ──
         def _stream_rows():
-            # Use ZIP/XML streaming instead of openpyxl to avoid ~900 MB RAM per 46 MB file.
-            yield from _stream_xlsx_rows(file_bytes, n)
+            for row in _stream_xlsx_rows(file_bytes, n):
+                yield [str(row[i]) if i < len(row) and row[i] is not None else None for i in range(n)]
 
-        if table_type == 'master':
-            row_source = (
-                [str(row[i]) if i < len(row) and row[i] is not None else None for i in range(n)]
-                for row in data_rows
-            )
-        else:
-            row_source = _stream_rows()
+        row_source = _stream_rows()
 
         # ── Create table + meta ───────────────────────────────────────────────
         with get_db() as conn:
@@ -1191,7 +1207,10 @@ def get_table_data(table):
 
         col_lookup = {}      # col -> {'text_db': str, 'key_fields': [str], 'text_table': str}
         col_hints = {}       # col -> [hint lines for tooltip]
-        if dd08l_exists_check and dd03l_exists:
+        if dd08l_missing:
+            for col in raw_cols:
+                col_hints[col] = ["Upload DD08L with FRKART='TEXT' to see cell descriptions"]
+        elif dd08l_exists_check and dd03l_exists:
             for col in raw_cols:
                 ct_row = conn.execute(
                     f'SELECT CHECKTABLE FROM "{dd03l_name}" WHERE TABNAME=? AND FIELDNAME=?',
@@ -1216,10 +1235,7 @@ def get_table_data(table):
                     (col, lookup_checktable, 'A', 'TEXT')
                 ).fetchone()
                 if not tt_row or not tt_row['TABNAME']:
-                    col_hints[col] = [
-                        f'DD08L: no text entry for {orig_table}',
-                        f'CHECKTABLE: {checktable}',
-                    ]
+                    col_hints[col] = [f'No text table found for {col} in DD08L']
                     continue
                 text_table = tt_row['TABNAME'].strip()
                 text_db = f'{custname}_{system}_{text_table}'
@@ -1228,10 +1244,7 @@ def get_table_data(table):
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (text_db,)
                 ).fetchone()
                 if not tt_exists:
-                    col_hints[col] = [
-                        f'CHECKTABLE: {checktable}',
-                        f'Text table: {text_table} not uploaded',
-                    ]
+                    col_hints[col] = [f'Upload {text_table} to see {col} descriptions']
                     continue
 
                 kf_rows = conn.execute(
@@ -1240,11 +1253,7 @@ def get_table_data(table):
                 ).fetchall()
                 key_fields = [r['FIELDNAME'] for r in kf_rows if r['FIELDNAME']]
                 if not key_fields:
-                    col_hints[col] = [
-                        f'CHECKTABLE: {checktable}',
-                        f'Text table: {text_table}',
-                        f'DD03L: no entries for {checktable}',
-                    ]
+                    col_hints[col] = [f'Upload DD03L with entries for {checktable} to see {col} descriptions']
                     continue
 
                 col_lookup[col] = {'text_db': text_db, 'key_fields': key_fields, 'text_table': text_table}
@@ -1267,7 +1276,7 @@ def get_table_data(table):
                 if dd07t_exists:
                     col_lookup[col] = {'source': 'dd07t', 'domname': domname, 'dd07t_db': dd07t_name}
                 else:
-                    col_hints[col] = [f'DD07T: not uploaded (domain: {domname})']
+                    col_hints[col] = [f'Upload DD07T to see {col} descriptions']
 
         # ── Build rows with enriched cell values ──
         desc_cache = {}  # (col, key_vals_tuple) -> str or None
@@ -1332,7 +1341,7 @@ def get_table_data(table):
         for col in dd07t_missing_cols:
             if col not in col_hints:
                 domname = col_lookup[col]['domname']
-                col_hints[col] = [f'DD07T: some values have no text (domain: {domname})']
+                col_hints[col] = [f'Upload DD07T to see all {col} descriptions']
 
         col_text_tables = {
             enriched_col: col_hints[raw_col]
