@@ -5,6 +5,7 @@ Serves the SPA and provides a REST API backed by SQLite.
 Run: python server.py
 """
 
+import glob
 import os
 import re
 import secrets
@@ -641,6 +642,18 @@ def init_db():
     conn.close()
 
 
+def _cleanup_stale_uploads():
+    """Remove any leftover temp upload files from a previous crashed run."""
+    for path in glob.glob('/tmp/harness_upload_*.xlsx'):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+_cleanup_stale_uploads()
+
+
 def _hash(password: str) -> str:
     """Hash a password with PBKDF2-SHA256 + random salt."""
     salt = secrets.token_hex(16)
@@ -929,9 +942,16 @@ def upload_excel():
             (job_id, custname, 'pending')
         )
 
+    # Write file bytes to a temp file so the background thread reads from disk
+    # instead of holding the full XLSX in RAM (prevents OOM on large uploads).
+    tmp_path = f'/tmp/harness_upload_{job_id}.xlsx'
+    with open(tmp_path, 'wb') as tmp_f:
+        tmp_f.write(file_bytes)
+    del file_bytes  # release RAM immediately; thread will use the disk file
+
     threading.Thread(
         target=_bg_insert,
-        args=(job_id, custname, file_bytes, headers, data_rows,
+        args=(job_id, custname, tmp_path, headers, data_rows,
               table_name, db_table_name, dd03l_db_name, table_type, system, client, date),
         daemon=True,
     ).start()
@@ -939,7 +959,7 @@ def upload_excel():
     return jsonify({'job_id': job_id})
 
 
-def _bg_insert(job_id, custname, file_bytes, headers, data_rows,
+def _bg_insert(job_id, custname, file_path, headers, data_rows,
                table_name, db_table_name, dd03l_db_name, table_type, system, client, date):
     """Background thread: validate (master only), count rows, insert into SQLite."""
     try:
@@ -961,7 +981,7 @@ def _bg_insert(job_id, custname, file_bytes, headers, data_rows,
             all_tabnames      = set()
             dd03l_fieldnames  = set()  # FIELDNAME values with non-empty ROLLNAME (for V4)
 
-            for row in _stream_xlsx_rows(file_bytes, n):
+            for row in _stream_xlsx_rows(file_path, n):
                 tab = str(row[tabname_idx]).strip().upper()  if tabname_idx   is not None and row[tabname_idx]   else None
                 fld = str(row[fieldname_idx]).strip()        if fieldname_idx is not None and row[fieldname_idx] else None
                 flg = str(row[keyflag_idx]).strip().upper()  if keyflag_idx   is not None and row[keyflag_idx]   else None
@@ -995,7 +1015,7 @@ def _bg_insert(job_id, custname, file_bytes, headers, data_rows,
                 key_fields = {r[0].strip() for r in rows if r[0] is not None}
 
         # ── Count total rows so the frontend can show a determinate progress bar ──
-        total_rows = _count_xlsx_rows(file_bytes)
+        total_rows = _count_xlsx_rows(file_path)
         with get_db() as conn:
             conn.execute('UPDATE upload_jobs SET total_rows=? WHERE job_id=?', (total_rows, job_id))
 
@@ -1016,7 +1036,7 @@ def _bg_insert(job_id, custname, file_bytes, headers, data_rows,
 
         # ── Row source: stream for all table types — never hold all rows in RAM ──
         def _stream_rows():
-            for row in _stream_xlsx_rows(file_bytes, n):
+            for row in _stream_xlsx_rows(file_path, n):
                 yield [str(row[i]) if i < len(row) and row[i] is not None else None for i in range(n)]
 
         row_source = _stream_rows()
@@ -1075,6 +1095,11 @@ def _bg_insert(job_id, custname, file_bytes, headers, data_rows,
                 'UPDATE upload_jobs SET status=?, error=? WHERE job_id=?',
                 ('error', str(e), job_id)
             )
+    finally:
+        try:
+            os.unlink(file_path)
+        except OSError:
+            pass
 
 
 @app.get('/api/upload/status/<job_id>')
