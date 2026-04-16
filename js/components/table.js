@@ -12,7 +12,7 @@ export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
     return;
   }
 
-  const cols = columns.length ? columns : Object.keys(rows[0]);
+  let cols = columns.length ? [...columns] : Object.keys(rows[0]);
 
   // ── Unique values per column (all rows, not just preview) ─────────────────
   const uniqueVals = new Map();
@@ -35,6 +35,7 @@ export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
   exportBar.className = 'tbl-export-bar';
   exportBar.innerHTML = `
     <span class="tbl-export-count"></span>
+    <input type="text" class="tbl-pin-input" placeholder="Pin column…" title="Type exact column name and press Enter to move it first" autocomplete="off" spellcheck="false" />
     <button class="tbl-export-btn" title="Export to Excel">
       <svg width="22" height="22" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
         <rect width="24" height="24" rx="3" fill="#1d6f42"/>
@@ -63,32 +64,74 @@ export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
   // ── Filter-input row (above header) ───────────────────────────────────────
   const filterTr = document.createElement('tr');
   filterTr.className = 'tbl-filter-row';
-  cols.forEach(c => {
-    const th = document.createElement('th');
-    th.className = 'tbl-filter-th';
-    th.dataset.col = c;
-    const inp = document.createElement('input');
-    inp.type        = 'text';
-    inp.placeholder = '…';
-    inp.className   = 'tbl-filter-input';
-    inp.dataset.col = c;
-    th.appendChild(inp);
-    filterTr.appendChild(th);
-  });
   thead.appendChild(filterTr);
 
   // ── Column-header row ─────────────────────────────────────────────────────
   const headerTr = document.createElement('tr');
-  cols.forEach(c => {
-    const th = document.createElement('th');
-    th.className   = 'tbl-col-header';
-    th.dataset.col = c;
-    const colTip = colTextTables[c] ? colTextTables[c].map(_esc).join('&#10;') : _esc(c);
-    th.innerHTML   = `<span class="tbl-col-name" title="${colTip}">${_esc(c)}</span>`
-                   + `<button class="tbl-filter-btn" data-col="${_esc(c)}" title="Filter">▾</button>`;
-    headerTr.appendChild(th);
-  });
   thead.appendChild(headerTr);
+
+  // ── Rebuild column headers (called on init and after pin reorder) ─────────
+  function _buildHeaders() {
+    filterTr.innerHTML = '';
+    headerTr.innerHTML = '';
+
+    cols.forEach(c => {
+      const fth = document.createElement('th');
+      fth.className = 'tbl-filter-th';
+      fth.dataset.col = c;
+      const inp = document.createElement('input');
+      inp.type        = 'text';
+      inp.placeholder = '…';
+      inp.className   = 'tbl-filter-input';
+      inp.dataset.col = c;
+      // Restore active filter text
+      const existingFilter = activeFilters.get(c);
+      if (existingFilter?.size) inp.value = [...existingFilter].join('|');
+      fth.appendChild(inp);
+      filterTr.appendChild(fth);
+
+      const hth = document.createElement('th');
+      hth.className   = 'tbl-col-header';
+      hth.dataset.col = c;
+      const colTip = colTextTables[c] ? colTextTables[c].map(_esc).join('&#10;') : _esc(c);
+      hth.innerHTML   = `<span class="tbl-col-name" title="${colTip}">${_esc(c)}</span>`
+                      + `<button class="tbl-filter-btn" data-col="${_esc(c)}" title="Filter">▾</button>`;
+      headerTr.appendChild(hth);
+    });
+
+    _bindHeaderEvents();
+    requestAnimationFrame(_fixStickyTop);
+  }
+
+  function _bindHeaderEvents() {
+    filterTr.querySelectorAll('.tbl-filter-input').forEach(inp => {
+      const col = inp.dataset.col;
+      inp.addEventListener('focus', () => _openDropdown(col, inp.parentElement, inp.value, false));
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'Enter') { _closeDropdown(); inp.blur(); }
+      });
+      inp.addEventListener('input', e => {
+        const text = e.target.value;
+        const matching = uniqueVals.get(col).filter(v => _matchesPattern(v, text));
+        if (text && matching.length) activeFilters.set(col, new Set(matching));
+        else activeFilters.delete(col);
+        _renderRows();
+        _openDropdown(col, inp.parentElement, text, false);
+      });
+    });
+
+    headerTr.querySelectorAll('.tbl-filter-btn').forEach(btn => {
+      const col = btn.dataset.col;
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        if (openDropdownCol === col) _closeDropdown();
+        else {
+          const fi = filterTr.querySelector(`.tbl-filter-input[data-col="${col}"]`);
+          _openDropdown(col, btn.closest('th'), fi?.value || '', true);
+        }
+      });
+    });
+  }
   table.appendChild(thead);
 
   const tbody = document.createElement('tbody');
@@ -280,35 +323,24 @@ export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
 
   // ── Event bindings ────────────────────────────────────────────────────────
 
-  // Filter input row
-  filterTr.querySelectorAll('.tbl-filter-input').forEach(inp => {
-    const col = inp.dataset.col;
-    inp.addEventListener('focus', () => _openDropdown(col, inp.parentElement, inp.value, false));
-    inp.addEventListener('keydown', e => {
-      if (e.key === 'Enter') { _closeDropdown(); inp.blur(); }
-    });
-    inp.addEventListener('input', e => {
-      const text = e.target.value;
-      // Auto-select all values that match the typed pattern
-      const matching = uniqueVals.get(col).filter(v => _matchesPattern(v, text));
-      if (text && matching.length) activeFilters.set(col, new Set(matching));
-      else activeFilters.delete(col);
+  // Pin column input
+  exportBar.querySelector('.tbl-pin-input').addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    const typed = e.target.value.trim();
+    const idx = cols.findIndex(c => c.toLowerCase() === typed.toLowerCase());
+    if (idx > 0) {
+      const actual = cols[idx];
+      cols.splice(idx, 1);
+      cols.unshift(actual);
+      _closeDropdown();
+      _buildHeaders();
       _renderRows();
-      _openDropdown(col, inp.parentElement, text, false);
-    });
-  });
-
-  // Column header filter buttons
-  headerTr.querySelectorAll('.tbl-filter-btn').forEach(btn => {
-    const col = btn.dataset.col;
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      if (openDropdownCol === col) _closeDropdown();
-      else {
-        const fi = filterTr.querySelector(`.tbl-filter-input[data-col="${col}"]`);
-        _openDropdown(col, btn.closest('th'), fi?.value || '', true);
-      }
-    });
+      e.target.value = '';
+      e.target.classList.remove('tbl-pin-error');
+    } else if (idx === -1 && typed) {
+      e.target.classList.add('tbl-pin-error');
+      setTimeout(() => e.target.classList.remove('tbl-pin-error'), 1000);
+    }
   });
 
   // Export to CSV
@@ -389,9 +421,9 @@ export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
   };
 
   // ── Initial render ────────────────────────────────────────────────────────
+  _buildHeaders();
   _renderRows();
   wrapEl.replaceChildren(container);
-  stickyFrame = requestAnimationFrame(_fixStickyTop);
 }
 
 function _esc(str) {
