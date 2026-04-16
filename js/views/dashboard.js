@@ -178,7 +178,10 @@ function _bindTbody(tbody, container) {
     });
   });
   tbody.querySelectorAll('.mt-row').forEach(row => {
-    row.addEventListener('click', () => _loadTableData(container, row.dataset.table, row.dataset.origTable));
+    row.addEventListener('click', () => {
+      if (container._tableLoading) return;
+      _loadTableData(container, row.dataset.table, row.dataset.origTable);
+    });
   });
 }
 
@@ -425,6 +428,13 @@ async function _loadTableData(container, table, origTable) {
   const wrapEl    = container.querySelector('#table-wrap');
   const nameLabel = container.querySelector('#table-name-label');
 
+  container._tableLoading = true;
+  container.querySelectorAll('.mt-row').forEach(r => r.classList.add('mt-row-disabled'));
+
+  emptyEl.style.display = 'none';
+  wrapEl.style.display = '';
+  wrapEl.innerHTML = '<div class="tbl-loading"><div class="tbl-spinner"></div><span>Loading…</span></div>';
+
   try {
     const data = await api.get(`/api/tables/${encodeURIComponent(table)}/data`);
 
@@ -433,8 +443,6 @@ async function _loadTableData(container, table, origTable) {
       toast('pls upload DD04T table with English language', 'err');
       return;
     }
-
-
 
     // V-Show-2: DD04T exists but some descriptions missing → warning, still show
     if (data.partial_descriptions) {
@@ -457,5 +465,8 @@ async function _loadTableData(container, table, origTable) {
     renderTable(wrapEl, { rows: data.rows, columns: data.columns, colTextTables: data.col_text_tables || {} });
   } catch (err) {
     toast(`Failed to load table data: ${err.message}`, 'err');
+  } finally {
+    container._tableLoading = false;
+    container.querySelectorAll('.mt-row').forEach(r => r.classList.remove('mt-row-disabled'));
   }
 }

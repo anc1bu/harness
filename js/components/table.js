@@ -1,6 +1,6 @@
 // Data table renderer with per-column Excel-style filtering.
 
-const PREVIEW_LIMIT = 5000;
+const PREVIEW_LIMIT = 1_000_000;
 const MAX_DROPDOWN_VALS = 500;
 
 export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
@@ -35,18 +35,20 @@ export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
   exportBar.className = 'tbl-export-bar';
   exportBar.innerHTML = `
     <span class="tbl-export-count"></span>
-    <input type="text" class="tbl-pin-input" placeholder="Pin column…" title="Type exact column name and press Enter to move it first" autocomplete="off" spellcheck="false" />
-    <button class="tbl-export-btn" title="Export to Excel">
-      <svg width="22" height="22" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-        <rect width="24" height="24" rx="3" fill="#1d6f42"/>
-        <rect x="13" y="3" width="8" height="18" rx="1" fill="#21a366"/>
-        <rect x="3" y="3" width="11" height="18" rx="1" fill="#107c41"/>
-        <line x1="13" y1="3" x2="13" y2="21" stroke="#185c37" stroke-width="0.5"/>
-        <line x1="3" y1="9" x2="21" y2="9" stroke="#185c37" stroke-width="0.5" opacity="0.5"/>
-        <line x1="3" y1="15" x2="21" y2="15" stroke="#185c37" stroke-width="0.5" opacity="0.5"/>
-        <text x="7.5" y="16" font-family="Arial,sans-serif" font-size="11" font-weight="bold" fill="white" text-anchor="middle">X</text>
-      </svg>
-    </button>
+    <div class="tbl-pin-group">
+      <input type="text" class="tbl-pin-input" placeholder="Pin column…" title="Type exact column name and press Enter to move it first" autocomplete="off" spellcheck="false" />
+      <button class="tbl-export-btn" title="Export to Excel">
+        <svg width="22" height="22" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <rect width="24" height="24" rx="3" fill="#1d6f42"/>
+          <rect x="13" y="3" width="8" height="18" rx="1" fill="#21a366"/>
+          <rect x="3" y="3" width="11" height="18" rx="1" fill="#107c41"/>
+          <line x1="13" y1="3" x2="13" y2="21" stroke="#185c37" stroke-width="0.5"/>
+          <line x1="3" y1="9" x2="21" y2="9" stroke="#185c37" stroke-width="0.5" opacity="0.5"/>
+          <line x1="3" y1="15" x2="21" y2="15" stroke="#185c37" stroke-width="0.5" opacity="0.5"/>
+          <text x="7.5" y="16" font-family="Arial,sans-serif" font-size="11" font-weight="bold" fill="white" text-anchor="middle">X</text>
+        </svg>
+      </button>
+    </div>
   `;
   container.appendChild(exportBar);
 
@@ -326,8 +328,11 @@ export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
   // Pin column input
   exportBar.querySelector('.tbl-pin-input').addEventListener('keydown', e => {
     if (e.key !== 'Enter') return;
-    const typed = e.target.value.trim();
-    const idx = cols.findIndex(c => c.toLowerCase() === typed.toLowerCase());
+    const typed = e.target.value.trim().toLowerCase();
+    const idx = cols.findIndex(c => {
+      const cl = c.toLowerCase();
+      return cl === typed || cl.startsWith(typed + ' - ');
+    });
     if (idx > 0) {
       const actual = cols[idx];
       cols.splice(idx, 1);

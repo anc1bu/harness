@@ -296,6 +296,18 @@ tbody tr.selected td { background: rgba(137,180,250,0.12); color: var(--accent);
 .avatar-menu-item.danger:hover { background: rgba(224,96,96,0.08); color: var(--danger); }
 .avatar-menu-item:last-child { border-radius: 0 0 5px 5px; }
 
+/* ── Table loading spinner ──────────────────────────────────────────────── */
+.tbl-loading {
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  height: 120px; color: var(--text-dim); font-size: 13px;
+}
+.tbl-spinner {
+  width: 22px; height: 22px; border-radius: 50%;
+  border: 3px solid var(--border); border-top-color: var(--accent);
+  animation: tbl-spin .7s linear infinite;
+}
+@keyframes tbl-spin { to { transform: rotate(360deg); } }
+
 /* ── Scroll position indicator ─────────────────────────────────────────── */
 .tbl-scroll-indicator {
   position: fixed; z-index: 2100; pointer-events: none;
@@ -308,15 +320,16 @@ tbody tr.selected td { background: rgba(137,180,250,0.12); color: var(--accent);
 /* ── Table filter toolbar ──────────────────────────────────────────────── */
 .tbl-container { display: flex; flex-direction: column; }
 .tbl-export-bar {
-  display: flex; align-items: center; justify-content: space-between;
+  display: flex; align-items: center; justify-content: flex-start; gap: 12px;
   padding: 5px 10px; background: var(--bg); border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
 .tbl-export-count { font-size: 12px; color: var(--text-dim); }
+.tbl-pin-group { display: flex; align-items: center; gap: 4px; }
 .tbl-pin-input {
   font-size: 12px; padding: 3px 8px; border-radius: 4px;
   border: 1px solid var(--border); background: var(--bg-alt); color: var(--text);
-  width: 180px; outline: none; transition: border-color .15s, box-shadow .15s;
+  width: 10ch; outline: none; transition: border-color .15s, box-shadow .15s;
 }
 .tbl-pin-input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 20%, transparent); }
 .tbl-pin-input.tbl-pin-error { border-color: #e05; animation: tbl-pin-shake .25s; }
