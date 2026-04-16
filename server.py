@@ -1188,165 +1188,201 @@ def get_table_data(table):
         ).fetchone()[0] if dd08l_exists_check else 0
         dd08l_missing = not dd08l_exists_check or dd08l_text_count == 0
 
-        # Build enriched headers
-        enriched_cols = []
-        all_missing   = []   # every field without a description (for logging)
-        missing_fields = []  # non-excepted missing fields (returned to frontend)
-        partial_descriptions = False
-
+        # ── Bulk prefetch all DD03L metadata for the source table (one query) ──
+        # Replaces ~4 × N_cols individual DD03L queries with a single scan.
         dd03l_exists = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (dd03l_name,)
         ).fetchone()
 
+        src_dd03l: dict = {}   # fieldname -> {rollname, checktable, domname}
+        if dd03l_exists:
+            for r in conn.execute(
+                f'SELECT FIELDNAME, ROLLNAME, CHECKTABLE, DOMNAME FROM "{dd03l_name}" WHERE TABNAME=?',
+                (orig_table.upper(),)
+            ).fetchall():
+                fn = r['FIELDNAME']
+                if fn not in src_dd03l:
+                    src_dd03l[fn] = {
+                        'rollname':   (r['ROLLNAME']   or '').strip(),
+                        'checktable': (r['CHECKTABLE'] or '').strip(),
+                        'domname':    (r['DOMNAME']    or '').strip(),
+                    }
+
+        # ── Bulk DD04T lookup for all rollnames (one query) ──
         vshow2_exceptions = set()
         if not dd04t_missing:
             vshow2_exceptions = _get_exceptions(conn, custname, 'V-Show-2', orig_table)
+
+        dd04t_map: dict = {}
+        if not dd04t_missing and src_dd03l:
+            rns = list({v['rollname'] for v in src_dd03l.values() if v['rollname']})
+            if rns:
+                ph = ','.join('?' * len(rns))
+                for r in conn.execute(
+                    f'SELECT ROLLNAME, SCRTEXT_M FROM "{dd04t_name}" WHERE ROLLNAME IN ({ph}) AND DDLANGUAGE=?',
+                    (*rns, 'EN')
+                ).fetchall():
+                    dd04t_map[r['ROLLNAME']] = (r['SCRTEXT_M'] or '').strip()
+
+        # Build enriched headers from prefetched dicts
+        enriched_cols = []
+        all_missing   = []
+        missing_fields = []
+        partial_descriptions = False
 
         for col in raw_cols:
             if dd04t_missing:
                 enriched_cols.append(col)
                 continue
-
-            # Look up ROLLNAME from DD03L
-            rollname_row = None
-            if dd03l_exists:
-                rollname_row = conn.execute(
-                    f'SELECT ROLLNAME FROM "{dd03l_name}" WHERE TABNAME = ? AND FIELDNAME = ?',
-                    (orig_table.upper(), col)
-                ).fetchone()
-
-            if not rollname_row or not rollname_row['ROLLNAME']:
-                enriched_cols.append(col)
-                all_missing.append(col)
-                if col not in vshow2_exceptions:
-                    missing_fields.append(col)
-                    partial_descriptions = True
-                continue
-
-            rollname = rollname_row['ROLLNAME'].strip()
-
-            # Look up SCRTEXT_M from DD04T
-            desc_row = conn.execute(
-                f'SELECT SCRTEXT_M FROM "{dd04t_name}" WHERE ROLLNAME = ? AND DDLANGUAGE = ?',
-                (rollname, 'EN')
-            ).fetchone()
-
-            if not desc_row or not desc_row['SCRTEXT_M']:
-                enriched_cols.append(col)
-                all_missing.append(col)
-                if col not in vshow2_exceptions:
-                    missing_fields.append(col)
-                    partial_descriptions = True
+            info = src_dd03l.get(col)
+            rollname = info['rollname'] if info else ''
+            scrtext  = dd04t_map.get(rollname, '') if rollname else ''
+            if scrtext:
+                enriched_cols.append(f'{col} - {scrtext}')
             else:
-                enriched_cols.append(f'{col} - {desc_row["SCRTEXT_M"].strip()}')
+                enriched_cols.append(col)
+                all_missing.append(col)
+                if col not in vshow2_exceptions:
+                    missing_fields.append(col)
+                    partial_descriptions = True
 
-        # Log V-Show-2 violations (all missing, regardless of exceptions)
         if all_missing:
             _log_val_fields(conn, custname, 'V-Show-2', orig_table, all_missing)
 
-        # ── Build text-table lookup config per column (once per request) ──
-        # For each column: DD03L → CHECKTABLE → DD08L (FRKART='TEXT') → text table → key fields
+        # ── Bulk prefetch chain resolution, DD08L, key fields (3-4 queries) ──
         dd08l_exists = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (dd08l_name,)
         ).fetchone()
-
         dd07t_exists = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (dd07t_name,)
         ).fetchone()
 
-        col_lookup = {}      # col -> {'text_db': str, 'key_fields': [str], 'text_table': str}
-        col_hints = {}       # col -> [hint lines for tooltip]
+        col_lookup = {}
+        col_hints  = {}
+
         if dd08l_missing:
             for col in raw_cols:
                 col_hints[col] = ["Upload DD08L with FRKART='TEXT' to see cell descriptions"]
         elif dd08l_exists_check and dd03l_exists:
+            # Collect checktables referenced by the source table's columns
+            checktable_for_col = {
+                col: src_dd03l[col]['checktable']
+                for col in raw_cols
+                if col in src_dd03l and src_dd03l[col]['checktable'] and src_dd03l[col]['checktable'] != '*'
+            }
+            unique_cts = list(set(checktable_for_col.values()))
+
+            # Bulk chain resolution: fetch DD03L rows for all checktables
+            chain_map: dict = {}   # (tabname, fieldname) -> checktable
+            if unique_cts:
+                ph = ','.join('?' * len(unique_cts))
+                for r in conn.execute(
+                    f'SELECT TABNAME, FIELDNAME, CHECKTABLE FROM "{dd03l_name}" WHERE TABNAME IN ({ph})',
+                    unique_cts
+                ).fetchall():
+                    key = (r['TABNAME'], r['FIELDNAME'])
+                    if key not in chain_map:
+                        chain_map[key] = (r['CHECKTABLE'] or '').strip()
+
+            # Determine lookup_checktable per col (one level of chain resolution)
+            lookup_ct_for_col = {}
+            for col, ct in checktable_for_col.items():
+                nxt = chain_map.get((ct, col), '')
+                lookup_ct_for_col[col] = nxt if nxt and nxt != '*' else ct
+
+            unique_lookup_cts = list(set(lookup_ct_for_col.values()))
+
+            # Bulk DD08L: all text table entries for the relevant checktables
+            dd08l_map: dict = {}   # (fieldname, checktable) -> text_table_name
+            if unique_lookup_cts:
+                ph = ','.join('?' * len(unique_lookup_cts))
+                for r in conn.execute(
+                    f'SELECT FIELDNAME, CHECKTABLE, TABNAME FROM "{dd08l_name}" '
+                    f'WHERE CHECKTABLE IN ({ph}) AND AS4LOCAL=? AND FRKART=?',
+                    (*unique_lookup_cts, 'A', 'TEXT')
+                ).fetchall():
+                    key = (r['FIELDNAME'], r['CHECKTABLE'])
+                    if key not in dd08l_map:
+                        dd08l_map[key] = r['TABNAME']
+
+            # Bulk key fields: all KEYFLAG='X' fields for all relevant tables
+            all_tables_needed = list(set(unique_cts) | set(unique_lookup_cts))
+            kf_map: dict = {}   # tabname -> [fieldnames]
+            if all_tables_needed:
+                ph = ','.join('?' * len(all_tables_needed))
+                for r in conn.execute(
+                    f'SELECT TABNAME, FIELDNAME FROM "{dd03l_name}" '
+                    f'WHERE TABNAME IN ({ph}) AND KEYFLAG=? AND FIELDNAME!=?',
+                    (*all_tables_needed, 'X', 'MANDT')
+                ).fetchall():
+                    kf_map.setdefault(r['TABNAME'], []).append(r['FIELDNAME'])
+
+            # Bulk existence check for all candidate text tables
+            potential_text_dbs = {
+                f'{custname}_{system}_{tt}'
+                for tt in dd08l_map.values() if tt
+            }
+            existing_tables: set = set()
+            if potential_text_dbs:
+                ph = ','.join('?' * len(potential_text_dbs))
+                existing_tables = {
+                    r[0] for r in conn.execute(
+                        f'SELECT name FROM sqlite_master WHERE type=? AND name IN ({ph})',
+                        ('table', *potential_text_dbs)
+                    ).fetchall()
+                }
+
+            # Build col_lookup from prefetched dicts (no more per-column DB queries)
             for col in raw_cols:
-                ct_row = conn.execute(
-                    f'SELECT CHECKTABLE FROM "{dd03l_name}" WHERE TABNAME=? AND FIELDNAME=?',
-                    (orig_table.upper(), col)
-                ).fetchone()
-                if not ct_row or not ct_row['CHECKTABLE'] or ct_row['CHECKTABLE'].strip() == '*':
+                checktable = checktable_for_col.get(col)
+                if not checktable:
                     continue
-                checktable = ct_row['CHECKTABLE'].strip()
+                lookup_ct = lookup_ct_for_col.get(col, checktable)
 
-                # Resolve chain one level: e.g. T685A.KAPPL → T681Z → T681A
-                # so the DD08L TEXT lookup uses the actual key table (T681A), not the
-                # intermediate check table (T681Z), and correctly finds T681B.
-                next_ct_row = conn.execute(
-                    f'SELECT CHECKTABLE FROM "{dd03l_name}" WHERE TABNAME=? AND FIELDNAME=?',
-                    (checktable, col)
-                ).fetchone()
-                next_checktable = (next_ct_row['CHECKTABLE'] or '').strip() if next_ct_row else ''
-                lookup_checktable = next_checktable if next_checktable and next_checktable != '*' else checktable
+                # Direct DD08L match
+                tt = dd08l_map.get((col, lookup_ct))
+                text_key_field = col
 
-                tt_row = conn.execute(
-                    f'SELECT TABNAME FROM "{dd08l_name}" WHERE FIELDNAME=? AND CHECKTABLE=? AND AS4LOCAL=? AND FRKART=?',
-                    (col, lookup_checktable, 'A', 'TEXT')
-                ).fetchone()
-                text_key_field = col  # which key field in the text table maps to this column's value
-
-                if not tt_row or not tt_row['TABNAME']:
-                    # Fallback: source column name may differ from the CHECKTABLE's own field name
-                    # (e.g. T685A.RKSCHL → T685.KSCHL). Try key fields of the CHECKTABLE.
-                    seen = set()
-                    for kf_r in conn.execute(
-                        f'SELECT FIELDNAME FROM "{dd03l_name}" WHERE TABNAME=? AND KEYFLAG=? AND FIELDNAME!=?',
-                        (lookup_checktable, 'X', 'MANDT')
-                    ).fetchall():
-                        kf = kf_r['FIELDNAME']
-                        if kf in seen or kf == col:
-                            continue
-                        seen.add(kf)
-                        candidate = conn.execute(
-                            f'SELECT TABNAME FROM "{dd08l_name}" WHERE FIELDNAME=? AND CHECKTABLE=? AND AS4LOCAL=? AND FRKART=?',
-                            (kf, lookup_checktable, 'A', 'TEXT')
-                        ).fetchone()
-                        if candidate and candidate['TABNAME']:
-                            tt_row = candidate
+                if not tt:
+                    # Fallback: source column name may differ from CHECKTABLE's field name
+                    # (e.g. T685A.RKSCHL → T685.KSCHL). Try key fields of lookup_checktable.
+                    for kf in dict.fromkeys(kf_map.get(lookup_ct, [])):
+                        if kf != col and (kf, lookup_ct) in dd08l_map:
+                            tt = dd08l_map[(kf, lookup_ct)]
                             text_key_field = kf
                             break
 
-                if not tt_row or not tt_row['TABNAME']:
+                if not tt:
                     col_hints[col] = [f'No text table found for {col} in DD08L']
                     continue
-                text_table = tt_row['TABNAME'].strip()
-                text_db = f'{custname}_{system}_{text_table}'
 
-                tt_exists = conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (text_db,)
-                ).fetchone()
-                if not tt_exists:
-                    col_hints[col] = [f'Upload {text_table} to see {col} descriptions']
+                text_db = f'{custname}_{system}_{tt}'
+                if text_db not in existing_tables:
+                    col_hints[col] = [f'Upload {tt} to see {col} descriptions']
                     continue
 
-                kf_rows = conn.execute(
-                    f'SELECT FIELDNAME FROM "{dd03l_name}" WHERE TABNAME=? AND KEYFLAG=? AND FIELDNAME!=?',
-                    (checktable, 'X', 'MANDT')
-                ).fetchall()
-                key_fields = [r['FIELDNAME'] for r in kf_rows if r['FIELDNAME']]
+                key_fields = kf_map.get(checktable, [])
                 if not key_fields:
                     col_hints[col] = [f'Upload DD03L with entries for {checktable} to see {col} descriptions']
                     continue
 
-                col_lookup[col] = {'text_db': text_db, 'key_fields': key_fields, 'text_table': text_table, 'text_key_field': text_key_field}
+                col_lookup[col] = {
+                    'text_db': text_db, 'key_fields': key_fields,
+                    'text_table': tt,   'text_key_field': text_key_field,
+                }
 
-        # ── DD07T domain value descriptions (columns without CHECKTABLE) ──
+        # ── DD07T domain value descriptions — reuse src_dd03l (no extra queries) ──
         if dd03l_exists:
             for col in raw_cols:
                 if col in col_lookup or col in col_hints:
                     continue
-                dom_row = conn.execute(
-                    f'SELECT CHECKTABLE, DOMNAME FROM "{dd03l_name}" WHERE TABNAME=? AND FIELDNAME=?',
-                    (orig_table.upper(), col)
-                ).fetchone()
-                if not dom_row or not dom_row['DOMNAME'] or not dom_row['DOMNAME'].strip():
+                info = src_dd03l.get(col)
+                if not info or not info['domname']:
                     continue
-                checktable = (dom_row['CHECKTABLE'] or '').strip()
-                if checktable and checktable != '*':
-                    continue  # has a real CHECKTABLE — handled by DD08L path
-                domname = dom_row['DOMNAME'].strip()
+                if info['checktable'] and info['checktable'] != '*':
+                    continue
                 if dd07t_exists:
-                    col_lookup[col] = {'source': 'dd07t', 'domname': domname, 'dd07t_db': dd07t_name}
+                    col_lookup[col] = {'source': 'dd07t', 'domname': info['domname'], 'dd07t_db': dd07t_name}
                 else:
                     col_hints[col] = [f'Upload DD07T to see {col} descriptions']
 
@@ -1387,43 +1423,49 @@ def get_table_data(table):
             cfg['_available_kfs'] = available_kfs
 
         # ── Build rows with enriched cell values ──
-        def _get_cell_desc(col, row):
-            cfg = col_lookup.get(col)
-            if not cfg:
-                return None
-            if cfg.get('source') == 'dd07t':
-                val = row[col]
-                if val is None or str(val).strip() == '':
-                    return None
-                return cfg['_preload'].get(str(val)) or None
-            available_kfs = cfg.get('_available_kfs')
-            if not available_kfs:
-                return None
-            text_key_field = cfg.get('text_key_field', col)
-            def _kf_val(kf):
-                if kf == text_key_field and text_key_field != col:
-                    return row[col]  # e.g. row['RKSCHL'] used as value for KSCHL
-                return row[kf]
-            key_vals = tuple(_kf_val(kf) for kf in available_kfs)
-            if any(v is None or str(v).strip() == '' for v in key_vals):
-                return None
-            return cfg['_preload'].get(key_vals) or None
+        # Pre-split columns so the row loop only visits columns that need enrichment.
+        plain_pairs   = []   # (raw_col, enriched_col) — no lookup, copy value as-is
+        dd07t_triples = []   # (raw_col, enriched_col, cfg) — domain-value lookup
+        text_triples  = []   # (raw_col, enriched_col, cfg) — text-table lookup
+
+        for raw_col, enriched_col in zip(raw_cols, enriched_cols):
+            cfg = col_lookup.get(raw_col)
+            if cfg is None:
+                plain_pairs.append((raw_col, enriched_col))
+            elif cfg.get('source') == 'dd07t':
+                dd07t_triples.append((raw_col, enriched_col, cfg))
+            else:
+                text_triples.append((raw_col, enriched_col, cfg))
 
         dd07t_missing_cols = set()
         rows_out = []
         for row in raw_rows:
-            enriched_row = {}
-            for raw_col, enriched_col in zip(raw_cols, enriched_cols):
-                val = row[raw_col]
-                desc = _get_cell_desc(raw_col, row)
-                cfg = col_lookup.get(raw_col)
-                if cfg and cfg.get('source') == 'dd07t' and desc is None:
-                    if val is not None and str(val).strip():
-                        dd07t_missing_cols.add(raw_col)
-                if desc and val is not None and str(val).strip() != '':
-                    enriched_row[enriched_col] = f'{val} - {desc}'
-                else:
-                    enriched_row[enriched_col] = val
+            row_d = dict(row)   # one dict conversion; faster than repeated sqlite3.Row[name] lookups
+            enriched_row = {ec: row_d[rc] for rc, ec in plain_pairs}
+
+            for rc, ec, cfg in dd07t_triples:
+                val = row_d[rc]
+                desc = None
+                if val is not None and str(val).strip():
+                    desc = cfg['_preload'].get(str(val)) or None
+                    if desc is None:
+                        dd07t_missing_cols.add(rc)
+                enriched_row[ec] = f'{val} - {desc}' if (desc and val is not None and str(val).strip()) else val
+
+            for rc, ec, cfg in text_triples:
+                val = row_d[rc]
+                desc = None
+                available_kfs = cfg.get('_available_kfs')
+                if available_kfs:
+                    text_key_field = cfg.get('text_key_field', rc)
+                    key_vals = tuple(
+                        row_d[rc] if (kf == text_key_field and text_key_field != rc) else row_d[kf]
+                        for kf in available_kfs
+                    )
+                    if not any(v is None or str(v).strip() == '' for v in key_vals):
+                        desc = cfg['_preload'].get(key_vals) or None
+                enriched_row[ec] = f'{val} - {desc}' if (desc and val is not None and str(val).strip() != '') else val
+
             rows_out.append(enriched_row)
 
         for col in dd07t_missing_cols:
