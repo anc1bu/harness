@@ -417,3 +417,85 @@ tbody tr.selected td { background: rgba(137,180,250,0.12); color: var(--accent);
   0%   { transform: translateX(-200%); }
   100% { transform: translateX(400%); }
 }
+
+/* ── Mobile responsive (≤ 768px) ─────────────────────────────────────────── */
+@media (max-width: 768px) {
+  /* Allow the page itself to scroll on mobile */
+  body {
+    height: auto;
+    min-height: 100vh;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+  #app { overflow: visible; min-height: 0; }
+
+  /* ── Topbar ── */
+  #topbar {
+    height: auto;
+    min-height: 52px;
+    padding: 8px 12px;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  #topbar .logo { font-size: 15px; letter-spacing: 1px; }
+  #topbar .clock { display: none; }
+
+  /* ── Login ── */
+  .login-box {
+    width: min(360px, 88vw);
+    padding: 28px 20px;
+  }
+
+  /* ── Dashboard: stack panels vertically ── */
+  #layout {
+    display: flex;
+    flex-direction: column;
+    flex: none;
+    height: auto;
+    overflow: visible;
+  }
+
+  #panel-control {
+    overflow-y: visible;
+    height: auto;
+    max-height: none;
+    grid-row: auto;
+  }
+  #panel-control .panel-body { overflow-x: auto; }
+  #custom-tables-wrap,
+  #basis-tables-wrap { overflow-x: auto; }
+
+  /* Give the graph and table fixed heights so their internal scroll still works */
+  #panel-graph  { grid-column: auto; height: 260px; }
+  #panel-table  { grid-column: auto; height: 440px; }
+
+  /* ── Settings / Admin: stack nav above content ── */
+  #settings-view {
+    overflow: visible;
+    flex: none;
+    height: auto;
+  }
+  .settings-layout {
+    display: flex;
+    flex-direction: column;
+    height: auto;
+    overflow: visible;
+  }
+  .settings-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    padding: 10px;
+    overflow: visible;
+    border-bottom: 1px solid var(--border);
+  }
+  .settings-nav .snav-item { padding: 6px 12px; margin-bottom: 0; }
+  .settings-content {
+    height: auto;
+    overflow-y: visible;
+    padding: 16px;
+  }
+
+  /* ── Inline buttons in topbar ── */
+  .btn.inline { font-size: 11px; padding: 5px 10px; }
+}
