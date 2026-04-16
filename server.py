@@ -16,7 +16,8 @@ import threading
 import zipfile
 from contextlib import contextmanager
 from functools import wraps
-from io import BytesIO
+import csv
+from io import BytesIO, StringIO
 from xml.etree.ElementTree import iterparse
 from flask import Flask, request, jsonify, send_from_directory
 import openpyxl
@@ -1161,10 +1162,10 @@ def _bg_insert(job_id, custname, file_path, headers, data_rows,
             conn.execute(
                 'UPDATE upload_jobs SET status=?, rows_inserted=?, orig_table=?, table_name=?, table_type=? WHERE job_id=?',
                 ('done', rows_inserted, table_name, db_table_name, table_type, job_id)
-            )
+            )            actual_count = conn.execute(f'SELECT COUNT(*) FROM "{db_table_name}"').fetchone()[0]
             conn.execute(
                 'UPDATE _table_meta SET row_count=? WHERE table_name=?',
-                (rows_inserted, db_table_name)
+                (actual_count, db_table_name)
             )
 
     except Exception as e:

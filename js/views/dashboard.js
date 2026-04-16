@@ -246,7 +246,7 @@ const _EXPECTED_BASIS = ['DD03L', 'DD04T', 'DD07T', 'DD08L'];
 
 function _fillBasisTbody(tbody, tables, container) {
   const uploaded = new Set(tables.map(t => t.orig_table.toUpperCase()));
-  let html = tables.map(_rowHtml).join('');
+  let html = tables.map(t => _rowHtml(t)).join('');
   for (const name of _EXPECTED_BASIS) {
     if (!uploaded.has(name)) {
       html += `

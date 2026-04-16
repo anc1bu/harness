@@ -1,19 +1,5 @@
 {
   "enabledPlugins": {
     "frontend-design@claude-plugins-official": true
-  },
-  "hooks": {
-    "PostToolUse": [
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "COUNT_FILE=/tmp/claude_edit_count; count=$(cat \"$COUNT_FILE\" 2>/dev/null || echo 0); count=$((count + 1)); echo $count > \"$COUNT_FILE\"; if [ \"$count\" -ge 10 ]; then echo 0 > \"$COUNT_FILE\"; cd /var/www/harness && git add -A && git commit -m \"Auto-commit after 10 changes\" && git push; fi",
-            "statusMessage": "Tracking edit count..."
-          }
-        ]
-      }
-    ]
   }
 }
