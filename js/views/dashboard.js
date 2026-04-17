@@ -502,7 +502,7 @@ async function _loadTableData(container, table, origTable) {
   wrapEl.innerHTML = '<div class="tbl-loading"><div class="tbl-spinner"></div><span>Loading…</span></div>';
 
   try {
-    const data = await api.get(`/api/tables/${encodeURIComponent(table)}/data`);
+    const data = await api.get(`/api/tables/${encodeURIComponent(table)}/data?offset=0&limit=5000`);
 
     // V-Show-1: DD04T missing or empty → error, do not show
     if (data.dd04t_missing) {
@@ -528,7 +528,17 @@ async function _loadTableData(container, table, origTable) {
 
     emptyEl.style.display = 'none';
     wrapEl.style.display = '';
-    renderTable(wrapEl, { rows: data.rows, columns: data.columns, colTextTables: data.col_text_tables || {} });
+    const onExport = () => api.download(
+      `/api/tables/${encodeURIComponent(table)}/export`,
+      `${origTable || table}.csv`
+    );
+    renderTable(wrapEl, {
+      rows: data.rows,
+      columns: data.columns,
+      colTextTables: data.col_text_tables || {},
+      total: data.total,
+      onExport,
+    });
   } catch (err) {
     toast(`Failed to load table data: ${err.message}`, 'err');
   } finally {

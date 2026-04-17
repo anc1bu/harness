@@ -3,7 +3,7 @@
 const PREVIEW_LIMIT = 5000;
 const MAX_DROPDOWN_VALS = 500;
 
-export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
+export function renderTable(wrapEl, { rows, columns, colTextTables = {}, total, onExport }) {
   // Cleanup previous render
   if (wrapEl._filterCleanup) wrapEl._filterCleanup();
 
@@ -187,8 +187,14 @@ export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
 
     tbody.innerHTML = html;
     toolbar.style.display = activeFilters.size ? '' : 'none';
-    exportBar.querySelector('.tbl-export-count').textContent =
-      filtered.length.toLocaleString() + ' row' + (filtered.length === 1 ? '' : 's');
+    const shownCount = filtered.length;
+    const totalCount = total ?? rows.length;
+    const countEl = exportBar.querySelector('.tbl-export-count');
+    if (shownCount === totalCount) {
+      countEl.textContent = shownCount.toLocaleString() + ' row' + (shownCount === 1 ? '' : 's');
+    } else {
+      countEl.textContent = `${shownCount.toLocaleString()} of ${totalCount.toLocaleString()} rows`;
+    }
 
     // Update active-filter indicators on headers and filter inputs
     cols.forEach(c => {
@@ -348,17 +354,21 @@ export function renderTable(wrapEl, { rows, columns, colTextTables = {} }) {
     }
   });
 
-  // Export to CSV
+  // Export
   exportBar.querySelector('.tbl-export-btn').addEventListener('click', () => {
-    const filtered = _getFilteredRows();
-    const csv = _toCsv(filtered, cols);
-    const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href     = url;
-    a.download = 'export.csv';
-    a.click();
-    URL.revokeObjectURL(url);
+    if (onExport) {
+      onExport();
+    } else {
+      const filtered = _getFilteredRows();
+      const csv = _toCsv(filtered, cols);
+      const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement('a');
+      a.href     = url;
+      a.download = 'export.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+    }
   });
 
   // Clear all filters
