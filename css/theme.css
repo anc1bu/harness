@@ -425,6 +425,7 @@ tbody tr.selected td { background: rgba(137,180,250,0.12); color: var(--accent);
 }
 .tfd-item:hover { background: rgba(74,222,128,0.07); }
 .tfd-item input[type=checkbox] { cursor: pointer; accent-color: var(--accent); flex-shrink: 0; }
+.tfd-loading { padding: 14px 10px; text-align: center; color: var(--text-dim); font-size: 13px; }
 .tfd-empty, .tfd-more {
   padding: 8px 10px; text-align: center; color: var(--text-dim); font-size: 12px;
   letter-spacing: .5px;
@@ -450,6 +451,7 @@ tbody tr.selected td { background: rgba(137,180,250,0.12); color: var(--accent);
   0%   { transform: translateX(-200%); }
   100% { transform: translateX(400%); }
 }
+
 
 /* ── Mobile responsive (≤ 768px) ─────────────────────────────────────────── */
 @media (max-width: 768px) {

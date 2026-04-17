@@ -501,8 +501,16 @@ async function _loadTableData(container, table, origTable) {
   wrapEl.style.display = '';
   wrapEl.innerHTML = '<div class="tbl-loading"><div class="tbl-spinner"></div><span>Loading…</span></div>';
 
+  const _fetchData = (filters = {}) => {
+    const params = new URLSearchParams({ offset: 0, limit: 5000 });
+    for (const [col, pat] of Object.entries(filters)) {
+      if (pat) params.set(`f.${col}`, pat);
+    }
+    return api.get(`/api/tables/${encodeURIComponent(table)}/data?${params}`);
+  };
+
   try {
-    const data = await api.get(`/api/tables/${encodeURIComponent(table)}/data?offset=0&limit=5000`);
+    const data = await _fetchData();
 
     // V-Show-1: DD04T missing or empty → error, do not show
     if (data.dd04t_missing) {
@@ -515,7 +523,7 @@ async function _loadTableData(container, table, origTable) {
       const fields  = (data.missing_fields || []).slice(0, 5);
       const more    = (data.missing_fields || []).length > 5 ? ` (+${data.missing_fields.length - 5} more)` : '';
       const fieldList = fields.length ? `\nMissing: ${fields.join(', ')}${more}` : '';
-      toast(`Some of the descriptions are missing, pls update DD04T${fieldList}`, 'warn');
+      toast(`Some of the header descriptions are missing, pls update DD04T${fieldList}`, 'warn');
     }
 
     if (nameLabel) nameLabel.textContent = origTable || '';
@@ -528,16 +536,34 @@ async function _loadTableData(container, table, origTable) {
 
     emptyEl.style.display = 'none';
     wrapEl.style.display = '';
-    const onExport = () => api.download(
-      `/api/tables/${encodeURIComponent(table)}/export`,
-      `${origTable || table}.csv`
-    );
+    const onExport = () => {
+      const token = localStorage.getItem('token') || '';
+      const url = `/api/tables/${encodeURIComponent(table)}/export?token=${encodeURIComponent(token)}`;
+      const a = document.createElement('a');
+      a.href = url; a.download = `${origTable || table}.csv`; a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    };
+    const allLoaded = data.total <= data.rows.length;
+    const onFilter = allLoaded ? undefined : (filters) => _fetchData(filters);
+    const onDistinct = allLoaded ? undefined : async (rawCol, currentFilters) => {
+      const params = new URLSearchParams({ col: rawCol });
+      for (const [col, pat] of Object.entries(currentFilters)) {
+        if (pat) params.set(`f.${col}`, pat);
+      }
+      const res = await api.get(`/api/tables/${encodeURIComponent(table)}/distinct?${params}`);
+      return res.values || [];
+    };
     renderTable(wrapEl, {
       rows: data.rows,
       columns: data.columns,
+      rawColumns: data.raw_columns || [],
       colTextTables: data.col_text_tables || {},
       total: data.total,
       onExport,
+      onFilter,
+      onDistinct,
     });
   } catch (err) {
     toast(`Failed to load table data: ${err.message}`, 'err');

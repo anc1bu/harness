@@ -705,7 +705,10 @@ def _verify_password(password: str, stored: str) -> bool:
 
 
 def _get_token():
-    return request.headers.get('Authorization', '').removeprefix('Bearer ')
+    token = request.headers.get('Authorization', '').removeprefix('Bearer ')
+    if not token and request.method == 'GET':
+        token = request.args.get('token', '')
+    return token
 
 
 # ── Auth helpers ───────────────────────────────────────────────────────────
@@ -1552,16 +1555,25 @@ def get_table_data(table):
         orig_table = meta['orig_table'] or table
         system     = meta['system']
 
+        # Get valid column names to whitelist filter params
         try:
-            total    = conn.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0]
+            table_cols = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
+
+        where_parts, filter_params = _parse_filter_clauses(request.args, table_cols)
+        where_sql = ('WHERE ' + ' AND '.join(where_parts)) if where_parts else ''
+
+        try:
+            total    = conn.execute(f'SELECT COUNT(*) FROM "{table}" {where_sql}', filter_params).fetchone()[0]
             raw_rows = conn.execute(
-                f'SELECT * FROM "{table}" LIMIT ? OFFSET ?', (limit, offset)
+                f'SELECT * FROM "{table}" {where_sql} LIMIT ? OFFSET ?', (*filter_params, limit, offset)
             ).fetchall()
         except Exception as e:
             return jsonify({'error': str(e)}), 500
 
         if not raw_rows:
-            return jsonify({'columns': [], 'rows': [], 'total': total, 'offset': offset, 'limit': limit,
+            return jsonify({'columns': [], 'raw_columns': [], 'rows': [], 'total': total, 'offset': offset, 'limit': limit,
                             'dd04t_missing': False, 'dd08l_missing': False, 'partial_descriptions': False,
                             'missing_fields': [], 'col_text_tables': {}})
 
@@ -1596,6 +1608,7 @@ def get_table_data(table):
 
     return jsonify({
         'columns':              enr['enriched_cols'],
+        'raw_columns':          raw_cols,
         'rows':                 rows_out,
         'total':                total,
         'offset':               offset,
@@ -1612,6 +1625,8 @@ def get_table_data(table):
 @require_auth
 def export_table(table):
     custname = _session_custname()
+
+    # Resolve metadata and enrichment setup before streaming
     with get_db() as conn:
         meta = conn.execute(
             'SELECT orig_table, system FROM _table_meta WHERE table_name = ? AND custname = ?',
@@ -1629,31 +1644,29 @@ def export_table(table):
             return jsonify({'error': str(e)}), 500
 
         if not raw_cols_row:
-            raw_cols = []
-            enr = None
-        else:
-            raw_cols = list(raw_cols_row.keys())
-            enr = _setup_enrichment(conn, orig_table, custname, system, raw_cols)
+            return Response('', mimetype='text/csv',
+                            headers={'Content-Disposition': f'attachment; filename="{orig_table}_{system}.csv"'})
 
-        def generate():
-            buf = StringIO()
-            writer = csv.writer(buf)
-            if enr:
-                writer.writerow(enr['enriched_cols'])
-            else:
-                yield ''
-                return
-            yield buf.getvalue()
-            buf.seek(0); buf.truncate(0)
+        raw_cols = list(raw_cols_row.keys())
+        enr = _setup_enrichment(conn, orig_table, custname, system, raw_cols)
 
-            plain_pairs   = enr['plain_pairs']
-            dd07t_triples = enr['dd07t_triples']
-            text_triples  = enr['text_triples']
+    # Generator opens its own connection so the with-block above can close cleanly
+    def generate(table=table, orig_table=orig_table, enr=enr):
+        buf = StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(enr['enriched_cols'])
+        yield buf.getvalue()
+        buf.seek(0); buf.truncate(0)
 
+        plain_pairs   = enr['plain_pairs']
+        dd07t_triples = enr['dd07t_triples']
+        text_triples  = enr['text_triples']
+
+        with get_db() as conn2:
             batch_size = 1000
             offset = 0
             while True:
-                rows = conn.execute(
+                rows = conn2.execute(
                     f'SELECT * FROM "{table}" LIMIT ? OFFSET ?', (batch_size, offset)
                 ).fetchall()
                 if not rows:
@@ -1665,12 +1678,64 @@ def export_table(table):
                 buf.seek(0); buf.truncate(0)
                 offset += batch_size
 
-        filename = f'{orig_table}_{system}.csv'
-        return Response(
-            generate(),
-            mimetype='text/csv',
-            headers={'Content-Disposition': f'attachment; filename="{filename}"'},
-        )
+    filename = f'{orig_table}_{system}.csv'
+    return Response(
+        generate(),
+        mimetype='text/csv',
+        headers={'Content-Disposition': f'attachment; filename="{filename}"'},
+    )
+
+
+def _parse_filter_clauses(args, table_cols, exclude_col=None):
+    """Build (where_parts, params) from ?f.COL=pattern query args.
+    Pattern starting with '=' is treated as pipe-delimited IN filter.
+    Otherwise applied as LIKE (supports * wildcard).
+    """
+    where_parts, params = [], []
+    for key, val in args.items():
+        if key.startswith('f.') and val.strip():
+            col = key[2:]
+            if col not in table_cols or col == exclude_col:
+                continue
+            pat = val.strip()
+            if pat.startswith('='):
+                vals = [v for v in pat[1:].split('||') if v != '']
+                if vals:
+                    ph = ','.join('?' * len(vals))
+                    where_parts.append(f'"{col}" IN ({ph})')
+                    params.extend(vals)
+            elif '*' in pat:
+                where_parts.append(f'"{col}" LIKE ?')
+                params.append(pat.replace('*', '%'))
+            else:
+                where_parts.append(f'"{col}" LIKE ?')
+                params.append(f'%{pat}%')
+    return where_parts, params
+
+
+@app.get('/api/tables/<table>/distinct')
+@require_auth
+def get_column_distinct(table):
+    custname = _session_custname()
+    col = request.args.get('col', '').strip()
+    if not col:
+        return jsonify({'error': 'col param required'}), 400
+    with get_db() as conn:
+        meta = conn.execute(
+            'SELECT 1 FROM _table_meta WHERE table_name=? AND custname=?', (table, custname)
+        ).fetchone()
+        if not meta:
+            return jsonify({'error': 'Table not found'}), 404
+        table_cols = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
+        if col not in table_cols:
+            return jsonify({'error': 'Column not found'}), 404
+        where_parts, params = _parse_filter_clauses(request.args, table_cols, exclude_col=col)
+        where_sql = ('WHERE ' + ' AND '.join(where_parts)) if where_parts else ''
+        rows = conn.execute(
+            f'SELECT DISTINCT "{col}" FROM "{table}" {where_sql} ORDER BY "{col}" LIMIT 10000',
+            params
+        ).fetchall()
+    return jsonify({'values': ['' if r[0] is None else str(r[0]) for r in rows]})
 
 
 # ── Customer routes ────────────────────────────────────────────────────────

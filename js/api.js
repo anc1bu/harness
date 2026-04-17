@@ -96,19 +96,6 @@ function uploadWithProgress(path, formData, onProgress) {
   });
 }
 
-async function download(path, filename) {
-  const token = localStorage.getItem('token');
-  const headers = {};
-  if (token) headers['Authorization'] = `Bearer ${token}`;
-  const res = await fetch(BASE + path, { headers });
-  if (res.status === 401 && token) { _handleUnauthorized(); return; }
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename; a.click();
-  URL.revokeObjectURL(url);
-}
 
 export const api = {
   get:                (path)                        => request('GET',    path),
@@ -117,5 +104,4 @@ export const api = {
   delete:             (path)                        => request('DELETE', path),
   upload:             (path, formData)              => upload(path, formData),
   uploadWithProgress: (path, formData, onProgress)  => uploadWithProgress(path, formData, onProgress),
-  download:           (path, filename)              => download(path, filename),
 };
