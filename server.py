@@ -90,29 +90,25 @@ def _v2_required_cols(ctx):
 
 
 def _v3_no_mixed_tabnames(ctx):
-    """V3 — DD03L cannot be mixed with other TABNAME values (master only)."""
-    table_name, headers, data_rows, table_type = (
-        ctx['table_name'], ctx['headers'], ctx['data_rows'], ctx['table_type']
-    )
+    """V3 — Two modes:
+    - No DD03L in DB: file must only contain TABNAME='DD03L' rows (short-circuit on first offender).
+    - DD03L in DB: mixed TABNAMEs allowed, but DD03L rows in Excel must exactly match DB row-by-row.
+    """
+    table_name, table_type = ctx['table_name'], ctx['table_type']
     t = f'[{table_type}]'
-    if 'all_tabnames' in ctx:
-        all_tabnames = ctx['all_tabnames']
-    else:
-        tabname_idx = headers.index('TABNAME')
-        all_tabnames = {
-            str(r[tabname_idx]).strip().upper()
-            for r in data_rows
-            if r[tabname_idx] is not None and str(r[tabname_idx]).strip() != ''
-        }
-        ctx['all_tabnames'] = all_tabnames  # cache for V4/V5
-    if 'DD03L' in all_tabnames and len(all_tabnames) > 1:
-        others = sorted(all_tabnames - {'DD03L'})
-        sample = ', '.join(others[:5]) + (' …' if len(others) > 5 else '')
+    offender = ctx.get('_v3_offender')
+    if offender:
         return _ValResult(
             code='V3',
             error=(f'[V3]{t} {table_name}: DD03L cannot be mixed with other table names in the TABNAME column. '
-                   f'Please upload a file that contains only DD03L entries. Found other values: {sample}'),
-            fields=[{'name': o, 'note': None} for o in others],
+                   f'Please upload a file that contains only DD03L entries. Found other values: {offender}'),
+            fields=[{'name': offender, 'note': None}],
+        )
+    if ctx.get('_v3_mismatch'):
+        return _ValResult(
+            code='V3',
+            error=f'[V3]{t} DD03L entries in the Excel and DB do not match. Delete DD03L and start over.',
+            fields=[],
         )
     return None
 
@@ -976,7 +972,8 @@ def upload_excel():
     if table_type == 'master':
         sync_steps = [_v1_technical_headers, _v2_required_cols]
     else:
-        sync_steps = _VALIDATION_PIPELINE.get(table_type, [])
+        # V6/V7/V8 already ran in pre-file step above; only V1 and V9 need headers
+        sync_steps = [_v1_technical_headers, _v9_column_match]
 
     data_rows = []  # master: loaded in background; basis/customizing: not needed for sync validation
     sync_ctx = {
@@ -1054,7 +1051,25 @@ def _bg_insert(job_id, custname, file_path, headers, data_rows,
             rollname_idx  = headers.index('ROLLNAME')  if 'ROLLNAME'  in headers else None
 
             all_tabnames      = set()
-            dd03l_fieldnames  = set()  # FIELDNAME values with non-empty ROLLNAME (for V4)
+            dd03l_fieldnames  = set()
+            v3_offender       = None
+            v3_mismatch       = None
+            excel_dd03l_rows  = {}  # pk_tuple -> {col: val} for row-by-row comparison
+
+            # Load existing DD03L rows from DB (keyed by PK) for comparison
+            db_dd03l_rows = {}
+            with get_db() as conn:
+                db_exists = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (dd03l_db_name,)
+                ).fetchone()
+                if db_exists:
+                    db_cols = [r[1] for r in conn.execute(f'PRAGMA table_info("{dd03l_db_name}")').fetchall()]
+                    for r in conn.execute(f'SELECT * FROM "{dd03l_db_name}" WHERE TABNAME = \'DD03L\'').fetchall():
+                        rd = {db_cols[i]: (r[i] or '').strip() for i in range(len(db_cols))}
+                        pk = (rd.get('FIELDNAME',''), rd.get('AS4LOCAL',''), rd.get('AS4VERS',''), rd.get('POSITION',''))
+                        db_dd03l_rows[pk] = rd
+            dd03l_in_db = bool(db_dd03l_rows)
 
             for row in _stream_xlsx_rows(file_path, n):
                 tab = str(row[tabname_idx]).strip().upper()  if tabname_idx   is not None and row[tabname_idx]   else None
@@ -1062,14 +1077,37 @@ def _bg_insert(job_id, custname, file_path, headers, data_rows,
                 flg = str(row[keyflag_idx]).strip().upper()  if keyflag_idx   is not None and row[keyflag_idx]   else None
                 rol = str(row[rollname_idx]).strip()         if rollname_idx  is not None and row[rollname_idx]  else None
                 if tab: all_tabnames.add(tab)
-                if fld and rol: dd03l_fieldnames.add(fld)
-                if flg == 'X' and fld: key_fields.add(fld)
+                if not dd03l_in_db:
+                    # No DD03L in DB: short-circuit on first non-DD03L TABNAME
+                    if tab and tab != 'DD03L' and v3_offender is None:
+                        v3_offender = tab
+                        break
+                if tab == 'DD03L':
+                    if fld and rol: dd03l_fieldnames.add(fld)
+                    if flg == 'X' and fld: key_fields.add(fld)
+                    if dd03l_in_db:
+                        rd = {headers[i]: (str(row[i]) if row[i] is not None else '').strip() for i in range(n)}
+                        pk = (rd.get('FIELDNAME',''), rd.get('AS4LOCAL',''), rd.get('AS4VERS',''), rd.get('POSITION',''))
+                        excel_dd03l_rows[pk] = rd
+
+            # Row-by-row comparison when DD03L already exists in DB
+            if dd03l_in_db:
+                if set(excel_dd03l_rows.keys()) != set(db_dd03l_rows.keys()):
+                    v3_mismatch = True
+                else:
+                    for pk, excel_row in excel_dd03l_rows.items():
+                        db_row = db_dd03l_rows[pk]
+                        if any(excel_row.get(c, '') != db_row.get(c, '') for c in headers):
+                            v3_mismatch = True
+                            break
 
             bg_ctx = {
                 'table_name':    table_name,   'table_type':    table_type,
                 'dd03l_db_name': dd03l_db_name, 'headers':       headers,
                 'data_rows':     [],            'all_tabnames':  all_tabnames,
                 '_fieldname_vals': dd03l_fieldnames,
+                '_v3_offender':  v3_offender,
+                '_v3_mismatch':  v3_mismatch,
             }
             for step in [_v3_no_mixed_tabnames, _v4_self_ref_columns, _v5_non_self_ref_columns]:
                 vr = step(bg_ctx)
@@ -1117,7 +1155,11 @@ def _bg_insert(job_id, custname, file_path, headers, data_rows,
         row_source = _stream_rows()
 
         # ── Create table + meta ───────────────────────────────────────────────
+        # Master tables (DD03L) are always full-replacement uploads: drop and
+        # recreate so the PRIMARY KEY is always applied correctly on re-uploads.
         with get_db() as conn:
+            if table_type == 'master':
+                conn.execute(f'DROP TABLE IF EXISTS "{db_table_name}"')
             conn.execute(f'CREATE TABLE IF NOT EXISTS "{db_table_name}" ({col_defs})')
             conn.execute(
                 'INSERT OR REPLACE INTO _table_meta (table_name, custname, orig_table, system, client, date) '
@@ -1146,8 +1188,9 @@ def _bg_insert(job_id, custname, file_path, headers, data_rows,
             with get_db() as conn:
                 tmp = db_table_name + '__sorted_tmp'
                 conn.execute(f'DROP TABLE IF EXISTS "{tmp}"')
+                conn.execute(f'CREATE TABLE "{tmp}" ({col_defs})')
                 conn.execute(
-                    f'CREATE TABLE "{tmp}" AS '
+                    f'INSERT OR IGNORE INTO "{tmp}" '
                     f'SELECT * FROM "{db_table_name}" '
                     f'ORDER BY TABNAME ASC, CAST(POSITION AS INTEGER) ASC'
                 )

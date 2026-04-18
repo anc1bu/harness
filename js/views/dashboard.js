@@ -242,7 +242,7 @@ function _bindDragDrop(tbody, panel, container) {
   });
 }
 
-const _EXPECTED_BASIS = ['DD03L', 'DD04T', 'DD07T', 'DD08L'];
+const _EXPECTED_BASIS = ['DD03L', 'DD04T', 'DD07T', 'DD02T', 'DD08L'];
 
 function _fillBasisTbody(tbody, tables, container) {
   const uploaded = new Set(tables.map(t => t.orig_table.toUpperCase()));

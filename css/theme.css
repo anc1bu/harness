@@ -351,11 +351,6 @@ tbody tr.selected td { background: rgba(137,180,250,0.12); color: var(--accent);
   border-radius: 4px; opacity: 0.85; transition: opacity .15s;
 }
 .tbl-export-btn:hover { opacity: 1; }
-.tbl-toolbar {
-  display: flex; align-items: center; justify-content: flex-end;
-  padding: 4px 8px; background: var(--bg); border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
 .tbl-clear-all {
   background: transparent; border: 1px solid var(--danger); color: var(--danger);
   font-family: inherit; font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase;

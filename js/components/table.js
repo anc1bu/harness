@@ -92,16 +92,12 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
           <text x="7.5" y="16" font-family="Arial,sans-serif" font-size="11" font-weight="bold" fill="white" text-anchor="middle">X</text>
         </svg>
       </button>
+      <button class="tbl-clear-all" style="display:none" title="Clear all filters">✕ CLEAR ALL FILTERS</button>
     </div>
   `;
   container.appendChild(exportBar);
 
-  // Toolbar (visible only when filters are active)
-  const toolbar = document.createElement('div');
-  toolbar.className = 'tbl-toolbar';
-  toolbar.style.display = 'none';
-  toolbar.innerHTML = '<button class="tbl-clear-all">✕ CLEAR ALL FILTERS</button>';
-  container.appendChild(toolbar);
+  const clearAllBtn = exportBar.querySelector('.tbl-clear-all');
 
   // Table
   const table = document.createElement('table');
@@ -127,7 +123,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
       fth.dataset.col = c;
       const inp = document.createElement('input');
       inp.type        = 'text';
-      inp.placeholder = '…';
+      inp.placeholder = 'search  (Z* = starts with)';
       inp.className   = 'tbl-filter-input';
       inp.dataset.col = c;
       // Restore active filter text
@@ -242,7 +238,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
     }
 
     tbody.innerHTML = html;
-    toolbar.style.display = (activeFilters.size || activePatterns.size || activeCheckboxes.size) ? '' : 'none';
+    clearAllBtn.style.display = (activeFilters.size || activePatterns.size || activeCheckboxes.size) ? '' : 'none';
     const shownCount = filtered.length;
     const countEl = exportBar.querySelector('.tbl-export-count');
     if (shownCount === serverTotal) {
@@ -474,7 +470,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
   });
 
   // Clear all filters
-  toolbar.querySelector('.tbl-clear-all').addEventListener('click', () => {
+  clearAllBtn.addEventListener('click', () => {
     activeFilters.clear();
     activePatterns.clear();
     activeCheckboxes.clear();
