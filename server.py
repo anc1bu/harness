@@ -650,6 +650,12 @@ def init_db():
             panel      TEXT    NOT NULL DEFAULT 'customizing',
             PRIMARY KEY (user_id, custname, orig_table)
         )''',
+        '''CREATE TABLE IF NOT EXISTS sub_panels (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            name         TEXT    NOT NULL,
+            parent_panel TEXT    NOT NULL DEFAULT 'customizing',
+            sort_order   INTEGER NOT NULL DEFAULT 0
+        )''',
     ]:
         try:
             conn.execute(sql)
@@ -928,8 +934,7 @@ def get_panel_sections():
         rows = conn.execute(
             'SELECT section, collapsed FROM panel_section_states WHERE user_id=?', (user_id,)
         ).fetchall()
-    states = {r['section']: bool(r['collapsed']) for r in rows}
-    return jsonify({s: states.get(s, False) for s in ('customizing', 'secondary', 'basis')})
+    return jsonify({r['section']: bool(r['collapsed']) for r in rows})
 
 
 @app.post('/api/panel-sections')
@@ -939,7 +944,9 @@ def set_panel_section():
     data    = request.json or {}
     section   = data.get('section', '').strip()
     collapsed = int(bool(data.get('collapsed', False)))
-    if section not in ('customizing', 'secondary', 'basis'):
+    static_ok = section in ('customizing', 'secondary', 'basis', 'pricing')
+    sp_ok     = section.startswith('sp:') and section[3:].isdigit()
+    if not static_ok and not sp_ok:
         return jsonify({'error': 'Invalid section'}), 400
     with get_db() as conn:
         conn.execute(
@@ -957,13 +964,78 @@ def set_panel_assignment():
     data     = request.json or {}
     orig_table = data.get('orig_table', '').strip()
     panel      = data.get('panel', '').strip()
-    if not orig_table or panel not in ('customizing', 'secondary'):
+    if not orig_table:
         return jsonify({'error': 'Invalid payload'}), 400
+    if panel not in ('customizing', 'secondary'):
+        try:
+            sp_id = int(panel)
+        except (ValueError, TypeError):
+            return jsonify({'error': 'Invalid payload'}), 400
+        with get_db() as conn:
+            if not conn.execute('SELECT 1 FROM sub_panels WHERE id=?', (sp_id,)).fetchone():
+                return jsonify({'error': 'Invalid payload'}), 400
     with get_db() as conn:
         conn.execute(
             'INSERT OR REPLACE INTO panel_assignments (user_id, custname, orig_table, panel) VALUES (?,?,?,?)',
             (user_id, custname, orig_table, panel)
         )
+    return jsonify({'ok': True})
+
+
+# ── Sub-panels ─────────────────────────────────────────────────────────────
+
+@app.get('/api/sub-panels')
+@require_auth
+def list_sub_panels():
+    with get_db() as conn:
+        rows = conn.execute(
+            'SELECT id, name, parent_panel, sort_order FROM sub_panels ORDER BY sort_order, id'
+        ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.post('/api/sub-panels')
+@require_admin
+def create_sub_panel():
+    data         = request.json or {}
+    name         = (data.get('name') or '').strip()
+    parent_panel = (data.get('parent_panel') or 'customizing').strip()
+    if not name or parent_panel not in ('customizing', 'secondary'):
+        return jsonify({'error': 'Invalid payload'}), 400
+    with get_db() as conn:
+        cur = conn.execute(
+            'INSERT INTO sub_panels (name, parent_panel) VALUES (?, ?)', (name, parent_panel)
+        )
+        sp_id = cur.lastrowid
+    return jsonify({'id': sp_id, 'name': name, 'parent_panel': parent_panel, 'sort_order': 0})
+
+
+@app.patch('/api/sub-panels/<int:sp_id>')
+@require_admin
+def update_sub_panel(sp_id):
+    data = request.json or {}
+    name = (data.get('name') or '').strip()
+    if not name:
+        return jsonify({'error': 'Name required'}), 400
+    with get_db() as conn:
+        if not conn.execute('SELECT 1 FROM sub_panels WHERE id=?', (sp_id,)).fetchone():
+            return jsonify({'error': 'Not found'}), 404
+        conn.execute('UPDATE sub_panels SET name=? WHERE id=?', (name, sp_id))
+    return jsonify({'ok': True})
+
+
+@app.delete('/api/sub-panels/<int:sp_id>')
+@require_admin
+def delete_sub_panel(sp_id):
+    with get_db() as conn:
+        sp = conn.execute('SELECT parent_panel FROM sub_panels WHERE id=?', (sp_id,)).fetchone()
+        if not sp:
+            return jsonify({'error': 'Not found'}), 404
+        conn.execute(
+            'UPDATE panel_assignments SET panel=? WHERE panel=?',
+            (sp['parent_panel'], str(sp_id))
+        )
+        conn.execute('DELETE FROM sub_panels WHERE id=?', (sp_id,))
     return jsonify({'ok': True})
 
 

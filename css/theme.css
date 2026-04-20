@@ -90,6 +90,8 @@ body {
   display: none;
 }
 .section-collapsed .section-count { display: inline; }
+.sub-section-wrap { border-top: 1px solid var(--border); margin-top: 4px; }
+.sub-section-hdr { padding: 6px 12px 6px 20px !important; font-size: 11px; opacity: 0.85; }
 
 /* ── Controls ── */
 .ctrl-section { margin-bottom: 14px; }

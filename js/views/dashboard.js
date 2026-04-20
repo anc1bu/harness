@@ -12,6 +12,10 @@ import { avatarDropdownHtml, initAvatarDropdown } from '../components/avatar.js'
 // ── General validation ─────────────────────────────────────────────────────
 const _FILENAME_RE = /^([A-Za-z0-9]+)_([A-Za-z0-9]+)_([A-Za-z0-9]+)_(\d+)\.xlsx$/i;
 
+function _esc(str) {
+  return String(str ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
 // ── Table type classification ──────────────────────────────────────────────
 const _MASTER_TABLES = new Set(['DD03L']);
 
@@ -47,7 +51,7 @@ export function mount(container) {
 
 // ── HTML ───────────────────────────────────────────────────────────────────
 
-function _tableSection(id, label, tbodyId, section) {
+function _tableSection(id, label, tbodyId, section, extraContent = '') {
   return `
     <div id="${id}" class="section-wrap" data-section="${section}">
       <div class="ctrl-label section-hdr" style="padding:10px 12px 6px;">
@@ -72,10 +76,12 @@ function _tableSection(id, label, tbodyId, section) {
             <tr><td colspan="5" class="meta-empty">No tables uploaded</td></tr>
           </tbody>
         </table>
+        ${extraContent}
       </div>
     </div>
   `;
 }
+
 
 function _html() {
   return `
@@ -153,16 +159,19 @@ function _startClock(container) {
 
 async function _loadTablesMeta(container) {
   try {
-    const [info, assignments, sectionStates] = await Promise.all([
+    const [info, assignments, sectionStates, subPanels] = await Promise.all([
       api.get('/api/tables/info'),
       api.get('/api/panel-assignments'),
       api.get('/api/panel-sections'),
+      api.get('/api/sub-panels'),
     ]);
     const { tables, system_client: sysClient } = info;
     const label = container.querySelector('#sys-client-label');
     if (label) label.textContent = sysClient ? ` (${sysClient})` : '';
-    _renderTablesMeta(container, tables, assignments);
+    _renderSubPanelSections(container, subPanels);
+    _renderTablesMeta(container, tables, assignments, subPanels);
     _applySectionStates(container, sectionStates);
+    _initSectionToggles(container);
     _autoFitControlPanel();
   } catch (err) {
     toast(`Failed to load tables: ${err.message}`, 'err');
@@ -188,6 +197,8 @@ function _applySectionStates(container, states) {
 
 function _initSectionToggles(container) {
   container.querySelectorAll('.section-hdr').forEach(hdr => {
+    if (hdr._toggleBound) return;
+    hdr._toggleBound = true;
     hdr.addEventListener('click', async () => {
       const wrap      = hdr.closest('.section-wrap');
       const section   = wrap.dataset.section;
@@ -237,23 +248,82 @@ function _initResize() {
   });
 }
 
-function _renderTablesMeta(container, tables, assignments = {}) {
+function _renderSubPanelSections(container, subPanels) {
+  // Remove any previously rendered sub-panel sections
+  container.querySelectorAll('.sub-section-wrap[data-sp-id]').forEach(el => el.remove());
+
+  for (const sp of subPanels) {
+    const parentWrap = container.querySelector(`.section-wrap[data-section="${sp.parent_panel}"]`);
+    if (!parentWrap) continue;
+    const parentBody = parentWrap.querySelector(':scope > .section-body');
+    if (!parentBody) continue;
+
+    const div = document.createElement('div');
+    div.id              = `sp-wrap-${sp.id}`;
+    div.className       = 'section-wrap sub-section-wrap';
+    div.dataset.section = `sp:${sp.id}`;
+    div.dataset.spId    = sp.id;
+    div.innerHTML = `
+      <div class="ctrl-label section-hdr sub-section-hdr">
+        <span>${_esc(sp.name)}</span>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span class="section-count"></span>
+          <span class="section-chevron">▾</span>
+        </div>
+      </div>
+      <div class="section-body">
+        <table class="meta-table">
+          <thead><tr><th>Table</th><th>Description</th><th>Date</th><th>Entry</th><th>Action</th></tr></thead>
+          <tbody id="sp-tbody-${sp.id}">
+            <tr><td colspan="5" class="meta-empty">No tables</td></tr>
+          </tbody>
+        </table>
+      </div>
+    `;
+    parentBody.appendChild(div);
+  }
+}
+
+function _renderTablesMeta(container, tables, assignments = {}, subPanels = []) {
   const basisTbody     = container.querySelector('#basis-meta-tbody');
   const customTbody    = container.querySelector('#custom-meta-tbody');
   const secondaryTbody = container.querySelector('#secondary-meta-tbody');
 
-  const basisTables     = tables.filter(t => ['master', 'basis'].includes(_classifyTable(t.orig_table)));
-  const customizingAll  = tables.filter(t => _classifyTable(t.orig_table) === 'customizing');
+  const basisTables    = tables.filter(t => ['master', 'basis'].includes(_classifyTable(t.orig_table)));
+  const customizingAll = tables.filter(t => _classifyTable(t.orig_table) === 'customizing');
 
-  const customTables    = customizingAll.filter(t => (assignments[t.orig_table] || 'customizing') === 'customizing');
+  const spIds = new Set(subPanels.map(sp => String(sp.id)));
+
+  const customTables    = customizingAll.filter(t => {
+    const p = assignments[t.orig_table] || 'customizing';
+    return p === 'customizing' || (p !== 'secondary' && !spIds.has(p));
+  });
   const secondaryTables = customizingAll.filter(t => assignments[t.orig_table] === 'secondary');
 
   _fillBasisTbody(basisTbody, basisTables, container);
-  _fillDraggableTbody(customTbody,    customTables,    'customizing', 'No customizing tables', container);
-  _fillDraggableTbody(secondaryTbody, secondaryTables, 'secondary',   'No secondary tables',   container);
+  _fillDraggableTbody(customTbody,    customTables,    'customizing', 'No customizing tables', container, subPanels);
+  _fillDraggableTbody(secondaryTbody, secondaryTables, 'secondary',   'No secondary tables',   container, subPanels);
   _updateSectionCount(container, 'basis-meta-tbody');
-  _updateSectionCount(container, 'custom-meta-tbody');
   _updateSectionCount(container, 'secondary-meta-tbody');
+
+  // Fill each sub-panel tbody
+  let spTotalUnderCustomizing = 0;
+  for (const sp of subPanels) {
+    const spTbody = container.querySelector(`#sp-tbody-${sp.id}`);
+    if (!spTbody) continue;
+    const spTables = customizingAll.filter(t => assignments[t.orig_table] === String(sp.id));
+    _fillDraggableTbody(spTbody, spTables, String(sp.id), 'No tables', container, subPanels);
+    _updateSectionCount(container, `sp-tbody-${sp.id}`);
+    if (sp.parent_panel === 'customizing') spTotalUnderCustomizing += spTables.length;
+  }
+
+  // Customizing count includes all nested sub-panel tables
+  const customWrap = container.querySelector('#custom-tables-wrap');
+  if (customWrap) {
+    const total = customTables.length + spTotalUnderCustomizing;
+    const badge = customWrap.querySelector(':scope > .section-hdr .section-count');
+    if (badge) badge.textContent = `${total} table${total !== 1 ? 's' : ''}`;
+  }
 }
 
 function _rowHtml(t, draggable = false) {
@@ -283,20 +353,15 @@ function _bindTbody(tbody, container) {
   });
 }
 
-function _fillDraggableTbody(tbody, tables, panel, emptyMsg, container) {
+function _fillDraggableTbody(tbody, tables, panel, emptyMsg, container, subPanels = []) {
   tbody.innerHTML = tables.length
     ? tables.map(t => _rowHtml(t, true)).join('')
     : `<tr><td colspan="5" class="meta-empty">${emptyMsg}</td></tr>`;
   _bindTbody(tbody, container);
-  _bindDragDrop(tbody, panel, container);
+  _bindDragDrop(tbody, panel, container, subPanels);
 }
 
-function _bindDragDrop(tbody, panel, container) {
-  const allPanels = () => [
-    container.querySelector('#custom-meta-tbody'),
-    container.querySelector('#secondary-meta-tbody'),
-  ];
-
+function _bindDragDrop(tbody, panel, container, subPanels = []) {
   tbody.querySelectorAll('.mt-draggable').forEach(row => {
     row.addEventListener('dragstart', e => {
       e.dataTransfer.setData('text/plain', JSON.stringify({
@@ -321,6 +386,21 @@ function _bindDragDrop(tbody, panel, container) {
     let data;
     try { data = JSON.parse(e.dataTransfer.getData('text/plain')); } catch { return; }
     if (data.fromPanel === panel) return;
+
+    // Compatibility rules:
+    // Sub-panel → its parent panel only
+    // Parent panel → any of its sub-panels
+    // secondary ↔ customizing only
+    const targetSp = subPanels.find(sp => String(sp.id) === panel);
+    const sourceSp = subPanels.find(sp => String(sp.id) === data.fromPanel);
+    if (targetSp) {
+      if (data.fromPanel !== targetSp.parent_panel) return;
+    } else if (sourceSp) {
+      if (panel !== sourceSp.parent_panel) return;
+    } else {
+      const staticCompat = { 'customizing': ['secondary'], 'secondary': ['customizing'] };
+      if (!staticCompat[panel]?.includes(data.fromPanel)) return;
+    }
 
     try {
       await api.post('/api/panel-assignments', { orig_table: data.origTable, panel });

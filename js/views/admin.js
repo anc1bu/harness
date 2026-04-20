@@ -6,7 +6,7 @@ import { navigate } from '../router.js';
 import { toast } from '../components/modal.js';
 import { avatarDropdownHtml, initAvatarDropdown } from '../components/avatar.js';
 
-const SECTIONS = ['Customers', 'Users', 'Validations'];
+const SECTIONS = ['Customers', 'Users', 'Validations', 'Sub-panels'];
 const _EXCEPTION_VALIDATIONS = new Set(['V4', 'V5', 'V9', 'V-Show-2']);
 
 function _esc(str) {
@@ -57,6 +57,7 @@ async function _renderSection(container, section) {
   if (section === 'Customers')   await _renderCustomers(body);
   if (section === 'Users')       await _renderUsers(body);
   if (section === 'Validations') await _renderValidations(body);
+  if (section === 'Sub-panels')  await _renderSubPanels(body);
 }
 
 // ── Customers ──────────────────────────────────────────────────────────────
@@ -378,5 +379,94 @@ async function _renderValidationExceptions(el) {
         } catch (err) { toast(err.message, 'err'); }
       });
     });
+  } catch (err) { toast(err.message, 'err'); }
+}
+
+// ── Sub-panels ─────────────────────────────────────────────────────────────
+
+async function _renderSubPanels(el) {
+  el.innerHTML = '<div style="color:var(--text-dim);font-size:11px">Loading…</div>';
+  try {
+    const subPanels = await api.get('/api/sub-panels');
+
+    const listHtml = subPanels.length ? `
+      <table class="meta-table" style="margin-bottom:16px">
+        <thead><tr><th>Name</th><th>Parent Panel</th><th>Actions</th></tr></thead>
+        <tbody>
+          ${subPanels.map(sp => `
+            <tr data-sp-id="${sp.id}">
+              <td>
+                <span class="sp-name-display">${_esc(sp.name)}</span>
+                <input type="text" class="sp-name-edit" value="${_esc(sp.name)}"
+                  style="display:none;width:160px" />
+              </td>
+              <td style="color:var(--text-dim);font-size:11px;text-transform:capitalize">${_esc(sp.parent_panel)}</td>
+              <td style="display:flex;gap:6px;align-items:center">
+                <button class="btn inline btn-sp-rename" data-sp-id="${sp.id}"
+                  style="margin:0;padding:2px 8px;font-size:10px">Rename</button>
+                <button class="btn danger btn-sp-del" data-sp-id="${sp.id}"
+                  style="margin:0;padding:2px 8px;font-size:10px">Delete</button>
+              </td>
+            </tr>
+          `).join('')}
+        </tbody>
+      </table>
+    ` : '<div style="color:var(--text-dim);font-size:12px;margin-bottom:16px">No sub-panels defined yet.</div>';
+
+    el.innerHTML = `
+      ${listHtml}
+      <div class="settings-section-title">Add Sub-panel</div>
+      <div class="ctrl-label">Name</div>
+      <input type="text" id="sp-new-name" placeholder="e.g. Pricing Tables" />
+      <div class="ctrl-label">Parent Panel</div>
+      <select id="sp-new-parent" style="background:var(--bg);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:4px;font-family:inherit;font-size:13px;width:100%;margin-bottom:10px">
+        <option value="customizing">Customizing</option>
+        <option value="secondary">Secondary</option>
+      </select>
+      <button class="btn primary" id="btn-sp-add">Add Sub-panel</button>
+    `;
+
+    el.querySelectorAll('.btn-sp-rename').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const row     = btn.closest('tr');
+        const display = row.querySelector('.sp-name-display');
+        const input   = row.querySelector('.sp-name-edit');
+        if (btn.textContent === 'Save') {
+          const newName = input.value.trim();
+          if (!newName) { toast('Name cannot be empty.', 'warn'); return; }
+          api.patch(`/api/sub-panels/${btn.dataset.spId}`, { name: newName })
+            .then(() => { toast('Renamed.', 'ok'); _renderSubPanels(el); })
+            .catch(err => toast(err.message, 'err'));
+        } else {
+          display.style.display = 'none';
+          input.style.display   = '';
+          input.focus();
+          btn.textContent = 'Save';
+        }
+      });
+    });
+
+    el.querySelectorAll('.btn-sp-del').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!confirm('Delete this sub-panel? Tables inside will move back to the parent panel.')) return;
+        try {
+          await api.delete(`/api/sub-panels/${btn.dataset.spId}`);
+          toast('Sub-panel deleted.', 'ok');
+          _renderSubPanels(el);
+        } catch (err) { toast(err.message, 'err'); }
+      });
+    });
+
+    el.querySelector('#btn-sp-add').addEventListener('click', async () => {
+      const name         = el.querySelector('#sp-new-name').value.trim();
+      const parent_panel = el.querySelector('#sp-new-parent').value;
+      if (!name) { toast('Name is required.', 'warn'); return; }
+      try {
+        await api.post('/api/sub-panels', { name, parent_panel });
+        toast(`Sub-panel "${name}" created.`, 'ok');
+        _renderSubPanels(el);
+      } catch (err) { toast(err.message, 'err'); }
+    });
+
   } catch (err) { toast(err.message, 'err'); }
 }
