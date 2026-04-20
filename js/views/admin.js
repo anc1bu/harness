@@ -16,7 +16,7 @@ function _esc(str) {
 export function mount(container) {
   container.innerHTML = `
     <div id="topbar">
-      <div class="logo">HARNESS <span>//</span> SAPCONS</div>
+      <div class="logo">HARNESS</div>
       ${avatarDropdownHtml()}
     </div>
     <div id="settings-view">

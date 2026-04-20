@@ -3,7 +3,7 @@
 const PREVIEW_LIMIT = 5000;
 const MAX_DROPDOWN_VALS = 500;
 
-export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], colTextTables = {}, total: initTotal, onExport, onFilter, onDistinct }) {
+export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], colTextTables = {}, total: initTotal, onExport, onFilter, onDistinct, colWidths = {}, onSaveColWidths }) {
   // Cleanup previous render
   if (wrapEl._filterCleanup) wrapEl._filterCleanup();
 
@@ -38,6 +38,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
   let openDropdownCol   = null;
   let _isSearchTyping   = false;
   let _filterTimer      = null;
+  let _dropdownTimer    = null;
 
   // ── Build filter param object from current active patterns + checkboxes ───
   function _buildCurrentFilters(excludeEnrichedCol = null) {
@@ -62,9 +63,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
       const data = await onFilter(_buildCurrentFilters());
       rows = data.rows;
       serverTotal = data.total;
-      _rebuildUniqueVals();
       activeFilters.clear();
-      colDistinctCache.clear();
       _closeDropdown();
     } catch { /* ignore fetch errors during typing */ }
     _renderRows();
@@ -101,6 +100,9 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
 
   // Table
   const table = document.createElement('table');
+  table.style.tableLayout = 'fixed';
+  const colgroup = document.createElement('colgroup');
+  table.appendChild(colgroup);
   const thead  = document.createElement('thead');
 
   // ── Filter-input row (above header) ───────────────────────────────────────
@@ -116,6 +118,19 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
   function _buildHeaders() {
     filterTr.innerHTML = '';
     headerTr.innerHTML = '';
+    colgroup.innerHTML = '';
+    cols.forEach(c => {
+      const col = document.createElement('col');
+      const saved = colWidths[c];
+      if (saved) {
+        col.style.width = `${saved}px`;
+      } else {
+        const sampleMax = rows.slice(0, 30).reduce((m, r) => Math.max(m, String(r[c] ?? '').length), 0);
+        const charLen   = Math.max(c.length, sampleMax);
+        col.style.width = `${Math.max(80, Math.min(320, charLen * 8))}px`;
+      }
+      colgroup.appendChild(col);
+    });
 
     cols.forEach(c => {
       const fth = document.createElement('th');
@@ -152,24 +167,90 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
   function _bindHeaderEvents() {
     filterTr.querySelectorAll('.tbl-filter-input').forEach(inp => {
       const col = inp.dataset.col;
-      inp.addEventListener('focus', () => _openDropdown(col, inp.parentElement, inp.value, false));
-      inp.addEventListener('keydown', e => {
-        if (e.key === 'Enter') { _closeDropdown(); inp.blur(); }
+      inp.addEventListener('focus', () => {
+        const _f0 = performance.now();
+        const rawCol = enrichedToRaw.get(col) ?? col.split(' - ')[0];
+        if (onDistinct && !colDistinctCache.has(rawCol)) {
+          inp.disabled    = true;
+          inp.placeholder = 'Loading…';
+          inp.classList.add('tbl-filter-loading');
+          console.log(`[filterInput] ▶ focus  col=${rawCol}  → disabled (distinct not cached)`);
+        } else {
+          console.log(`[filterInput] ▶ focus  col=${rawCol}  → immediately editable (cached=${colDistinctCache.has(rawCol)}, serverSide=${!!onDistinct})`);
+        }
+        _openDropdown(col, inp.parentElement, inp.value, false);
       });
+      let _lastKeyTime = 0;
       inp.addEventListener('input', e => {
+        const _t0 = performance.now();
+        const _gap = _lastKeyTime ? (_t0 - _lastKeyTime).toFixed(1) : '–';
+        _lastKeyTime = _t0;
+
         const text = e.target.value;
         if (onFilter) {
-          if (text) activePatterns.set(col, text); else activePatterns.delete(col);
           activeFilters.delete(col);
+          activeCheckboxes.delete(col);
+          activePatterns.delete(col);
           clearTimeout(_filterTimer);
-          _filterTimer = setTimeout(_fetchFiltered, 400);
-          _openDropdown(col, inp.parentElement, text, false);
         } else {
-          const matching = uniqueVals.get(col).filter(v => _matchesPattern(v, text));
-          if (text && matching.length) activeFilters.set(col, new Set(matching));
+          activeFilters.delete(col);
+        }
+        clearTimeout(_dropdownTimer);
+        const _doDropdown = () => {
+          if (onFilter && text) {
+            const rawCol2  = enrichedToRaw.get(col) ?? col.split(' - ')[0];
+            const cached2  = colDistinctCache.get(rawCol2);
+            if (cached2?.values) {
+              const labels2 = cached2.labels || {};
+              const matching = cached2.values.filter(v => {
+                const lbl  = labels2[v] || '';
+                const desc = lbl.includes(' - ') ? lbl.slice(lbl.indexOf(' - ') + 3) : '';
+                return _matchesPattern(v, text) || _matchesPattern(lbl, text) || _matchesPattern(desc, text);
+              });
+              if (matching.length) { activeCheckboxes.set(col, new Set(matching)); }
+              else                  { activePatterns.set(col, text); }
+            } else {
+              activePatterns.set(col, text);
+            }
+          } else if (!onFilter) {
+            const matching = text ? uniqueVals.get(col).filter(v => _matchesPattern(v, text)) : [];
+            if (matching.length) activeFilters.set(col, new Set(matching));
+            else activeFilters.delete(col);
+          }
+          _openDropdown(col, inp.parentElement, text, false);
+        };
+        _dropdownTimer = setTimeout(_doDropdown, 400);
+        console.log(`[input] handler=${(performance.now()-_t0).toFixed(2)}ms`);
+      });
+      inp.addEventListener('keydown', e => {
+        if (e.key !== 'Enter') return;
+        clearTimeout(_filterTimer);
+        clearTimeout(_dropdownTimer);
+        _closeDropdown();
+        inp.blur();
+        if (onFilter) {
+          const text     = inp.value;
+          const rawCol2  = enrichedToRaw.get(col) ?? col.split(' - ')[0];
+          const cached2  = colDistinctCache.get(rawCol2);
+          if (text && cached2?.values) {
+            const labels2 = cached2.labels || {};
+            const matching = cached2.values.filter(v => {
+              const lbl  = labels2[v] || '';
+              const desc = lbl.includes(' - ') ? lbl.slice(lbl.indexOf(' - ') + 3) : '';
+              return _matchesPattern(v, text) || _matchesPattern(lbl, text) || _matchesPattern(desc, text);
+            });
+            if (matching.length) {
+              activeCheckboxes.set(col, new Set(matching));
+              activePatterns.delete(col);
+            }
+          }
+          _fetchFiltered();
+        } else {
+          const text = inp.value;
+          const matching = text ? uniqueVals.get(col)?.filter(v => _matchesPattern(v, text)) ?? [] : [];
+          if (matching.length) activeFilters.set(col, new Set(matching));
           else activeFilters.delete(col);
           _renderRows();
-          _openDropdown(col, inp.parentElement, text, false);
         }
       });
     });
@@ -211,6 +292,11 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
   };
 
   // ── Row rendering ─────────────────────────────────────────────────────────
+  const RENDER_BATCH = 200;
+  let _filteredCache  = [];
+  let _renderedCount  = 0;
+  let _batchObserver  = null;
+
   function _getFilteredRows() {
     if (!activeFilters.size) return rows;
     return rows.filter(r => {
@@ -221,33 +307,80 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
     });
   }
 
-  function _renderRows() {
-    const filtered = _getFilteredRows();
-    const preview  = filtered.slice(0, PREVIEW_LIMIT);
+  function _disposeBatchObserver() {
+    if (_batchObserver) { _batchObserver.disconnect(); _batchObserver = null; }
+  }
 
-    let html = preview.map((r, i) => {
-      let tr = `<tr data-i="${i}">`;
-      cols.forEach(c => { tr += `<td>${_esc(String(r[c] ?? ''))}</td>`; });
+  function _buildRowsHtml(batch, startIdx) {
+    return batch.map((r, i) => {
+      let tr = `<tr data-i="${startIdx + i}">`;
+      cols.forEach(c => {
+        const v = _esc(String(r[c] ?? ''));
+        tr += `<td title="${v}">${v}</td>`;
+      });
       return tr + '</tr>';
     }).join('');
+  }
 
-    if (!filtered.length) {
-      html = `<tr><td colspan="${cols.length}" style="text-align:center;color:var(--text-dim);padding:16px">No rows match current filters</td></tr>`;
-    } else if (filtered.length > PREVIEW_LIMIT) {
-      html += `<tr><td colspan="${cols.length}" style="text-align:center;color:var(--text-dim);padding:10px">… ${(filtered.length - PREVIEW_LIMIT).toLocaleString()} more rows (${filtered.length.toLocaleString()} total filtered)</td></tr>`;
+  function _appendBatch() {
+    _disposeBatchObserver();
+    const toRender = Math.min(_filteredCache.length, PREVIEW_LIMIT);
+    const start    = _renderedCount;
+    const end      = Math.min(start + RENDER_BATCH, toRender);
+
+    tbody.querySelector('.tbl-sentinel')?.remove();
+    tbody.insertAdjacentHTML('beforeend', _buildRowsHtml(_filteredCache.slice(start, end), start));
+    _renderedCount = end;
+
+    if (_renderedCount < toRender) {
+      const sentinel = document.createElement('tr');
+      sentinel.className = 'tbl-sentinel';
+      sentinel.innerHTML = `<td colspan="${cols.length}" style="padding:6px;text-align:center;color:var(--text-dim);font-size:11px">${_renderedCount.toLocaleString()} / ${toRender.toLocaleString()} rows loaded</td>`;
+      tbody.appendChild(sentinel);
+      _batchObserver = new IntersectionObserver(entries => {
+        if (entries[0].isIntersecting) _appendBatch();
+      }, { root: wrapEl, rootMargin: '300px' });
+      _batchObserver.observe(sentinel);
+    } else if (_filteredCache.length > PREVIEW_LIMIT) {
+      tbody.insertAdjacentHTML('beforeend',
+        `<tr><td colspan="${cols.length}" style="text-align:center;color:var(--text-dim);padding:10px">… ${(_filteredCache.length - PREVIEW_LIMIT).toLocaleString()} more rows (${_filteredCache.length.toLocaleString()} total filtered)</td></tr>`
+      );
     }
+  }
 
-    tbody.innerHTML = html;
-    clearAllBtn.style.display = (activeFilters.size || activePatterns.size || activeCheckboxes.size) ? '' : 'none';
-    const shownCount = filtered.length;
-    const countEl = exportBar.querySelector('.tbl-export-count');
-    if (shownCount === serverTotal) {
-      countEl.textContent = shownCount.toLocaleString() + ' row' + (shownCount === 1 ? '' : 's');
+  function _renderRows() {
+    _disposeBatchObserver();
+    _filteredCache = _getFilteredRows();
+    _renderedCount = 0;
+
+    if (!_filteredCache.length) {
+      tbody.innerHTML = `<tr><td colspan="${cols.length}" style="text-align:center;color:var(--text-dim);padding:16px">No rows match current filters</td></tr>`;
     } else {
-      countEl.textContent = `${shownCount.toLocaleString()} of ${serverTotal.toLocaleString()} rows`;
+      tbody.innerHTML = _buildRowsHtml(_filteredCache.slice(0, RENDER_BATCH), 0);
+      _renderedCount = Math.min(RENDER_BATCH, Math.min(_filteredCache.length, PREVIEW_LIMIT));
+      if (_renderedCount < Math.min(_filteredCache.length, PREVIEW_LIMIT)) {
+        const sentinel = document.createElement('tr');
+        sentinel.className = 'tbl-sentinel';
+        sentinel.innerHTML = `<td colspan="${cols.length}" style="padding:6px;text-align:center;color:var(--text-dim);font-size:11px">${_renderedCount.toLocaleString()} / ${Math.min(_filteredCache.length, PREVIEW_LIMIT).toLocaleString()} rows loaded</td>`;
+        tbody.appendChild(sentinel);
+        _batchObserver = new IntersectionObserver(entries => {
+          if (entries[0].isIntersecting) _appendBatch();
+        }, { root: wrapEl, rootMargin: '300px' });
+        _batchObserver.observe(sentinel);
+      } else if (_filteredCache.length > PREVIEW_LIMIT) {
+        tbody.insertAdjacentHTML('beforeend',
+          `<tr><td colspan="${cols.length}" style="text-align:center;color:var(--text-dim);padding:10px">… ${(_filteredCache.length - PREVIEW_LIMIT).toLocaleString()} more rows (${_filteredCache.length.toLocaleString()} total filtered)</td></tr>`
+        );
+      }
     }
 
-    // Update active-filter indicators on headers and filter inputs
+    clearAllBtn.style.display = (activeFilters.size || activePatterns.size || activeCheckboxes.size) ? '' : 'none';
+    const shownCount = _filteredCache.length;
+    const countEl    = exportBar.querySelector('.tbl-export-count');
+    countEl.textContent = shownCount === serverTotal
+      ? shownCount.toLocaleString() + ' row' + (shownCount === 1 ? '' : 's')
+      : `${shownCount.toLocaleString()} of ${serverTotal.toLocaleString()} rows`;
+
     cols.forEach(c => {
       const isActive = (activeFilters.get(c)?.size ?? 0) > 0 || activePatterns.has(c) || (activeCheckboxes.get(c)?.size ?? 0) > 0;
       headerTr.querySelector(`th[data-col="${c}"]`)?.classList.toggle('filter-active', isActive);
@@ -263,17 +396,38 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
     _renderDropdown(col, rawCol, anchorEl, searchText, focusSearch);
 
     if (onDistinct && !colDistinctCache.has(rawCol)) {
+      const _od0 = performance.now();
+      console.log(`[filterInput] ⬇ distinct fetch start  col=${rawCol}`);
       colDistinctCache.set(rawCol, null); // mark loading
       onDistinct(rawCol, _buildCurrentFilters(col)).then(vals => {
+        const _od1 = performance.now();
+        console.log(`[filterInput] ✔ distinct fetch done  col=${rawCol}  +${(_od1-_od0).toFixed(0)}ms  (${vals?.values?.length ?? vals?.length ?? 0} values)`);
         colDistinctCache.set(rawCol, vals);
+        const headerInp = filterTr.querySelector(`.tbl-filter-input[data-col="${col}"]`);
+        if (headerInp?.disabled) {
+          headerInp.disabled    = false;
+          headerInp.placeholder = 'search  (Z* = starts with)';
+          headerInp.classList.remove('tbl-filter-loading');
+          headerInp.focus();
+          console.log(`[filterInput] ✔ input enabled + focused  col=${rawCol}  +${(performance.now()-_od0).toFixed(0)}ms`);
+        }
         if (openDropdownCol === col) _renderDropdown(col, rawCol, anchorEl, searchText, focusSearch);
-      }).catch(() => colDistinctCache.set(rawCol, []));
+      }).catch(() => {
+        colDistinctCache.set(rawCol, []);
+        const headerInp = filterTr.querySelector(`.tbl-filter-input[data-col="${col}"]`);
+        if (headerInp?.disabled) {
+          headerInp.disabled    = false;
+          headerInp.placeholder = 'search  (Z* = starts with)';
+          headerInp.classList.remove('tbl-filter-loading');
+          console.log(`[filterInput] ✗ distinct fetch error  col=${rawCol}  → input re-enabled`);
+        }
+      });
     }
   }
 
   function _renderDropdown(col, rawCol, anchorEl, searchText, focusSearch) {
     // Decide value source: distinct cache (server) or uniqueVals (loaded rows)
-    let allVals;
+    let allVals, labelMap = {};
     if (onDistinct) {
       const cached = colDistinctCache.get(rawCol);
       if (cached === null) {
@@ -284,14 +438,17 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
         if (isNewOpen) { _positionDropdown(anchorEl); dropdown.style.display = ''; }
         return;
       }
-      allVals = cached ?? [];
+      allVals  = cached?.values ?? cached ?? [];
+      labelMap = cached?.labels ?? {};
     } else {
       allVals = uniqueVals.get(col) ?? [];
     }
 
     const selected = onFilter ? (activeCheckboxes.get(col) || new Set()) : (activeFilters.get(col) || new Set());
 
-    const matchVals = searchText ? allVals.filter(v => _matchesPattern(v, searchText)) : allVals;
+    const _getDesc = v => { const l = labelMap[v] || ''; const i = l.indexOf(' - '); return i >= 0 ? l.slice(i + 3) : ''; };
+    const _matchesLabel = (v, pat) => _matchesPattern(v, pat) || _matchesPattern(labelMap[v] || '', pat) || _matchesPattern(_getDesc(v), pat);
+    const matchVals = searchText ? allVals.filter(v => _matchesLabel(v, searchText)) : allVals;
     const visible   = matchVals.slice(0, MAX_DROPDOWN_VALS);
     const hasMore   = matchVals.length > MAX_DROPDOWN_VALS;
     const allChk    = visible.length > 0 && visible.every(v => selected.has(v));
@@ -299,10 +456,11 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
 
     const listHtml = visible.length === 0
       ? '<div class="tfd-empty">No matching values</div>'
-      : visible.map(v =>
-          `<label class="tfd-item"><input type="checkbox" class="tfd-check-val" data-val="${_esc(v)}" ${selected.has(v) ? 'checked' : ''} />`
-        + `<span>${_esc(v) || '<em style="color:var(--text-dim)">(empty)</em>'}</span></label>`
-        ).join('')
+      : visible.map(v => {
+          const display = labelMap[v] || v;
+          return `<label class="tfd-item"><input type="checkbox" class="tfd-check-val" data-val="${_esc(v)}" ${selected.has(v) ? 'checked' : ''} />`
+               + `<span>${_esc(display) || '<em style="color:var(--text-dim)">(empty)</em>'}</span></label>`;
+        }).join('')
         + (hasMore ? `<div class="tfd-more">… ${(matchVals.length - MAX_DROPDOWN_VALS).toLocaleString()} more — type to narrow</div>` : '');
 
     const isNewOpen = dropdown.style.display === 'none' || dropdown.dataset.col !== col;
@@ -332,31 +490,44 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
     _isSearchTyping = false;
 
     // ── Dropdown events ────────────────────────────────────────────────────
-    searchInput.addEventListener('keydown', e => { if (e.key === 'Enter') _closeDropdown(); });
-
+    // Typing: select matching options visually only — rows update on Enter.
     searchInput.addEventListener('input', e => {
       _isSearchTyping = true;
       const text = e.target.value;
-      filterTr.querySelector(`.tbl-filter-input[data-col="${col}"]`).value = text;
+      clearTimeout(_filterTimer);
+      const matching = text ? allVals.filter(v => _matchesLabel(v, text)) : [];
       if (onFilter) {
-        if (text) activePatterns.set(col, text); else activePatterns.delete(col);
-        activeCheckboxes.delete(col);
+        if (matching.length) activeCheckboxes.set(col, new Set(matching));
+        else activeCheckboxes.delete(col);
         activeFilters.delete(col);
-        clearTimeout(_filterTimer);
-        _filterTimer = setTimeout(_fetchFiltered, 400);
-        _renderDropdown(col, rawCol, anchorEl, text, false);
+        activePatterns.delete(col);
       } else {
-        const matching = allVals.filter(v => _matchesPattern(v, text));
         if (text && matching.length) activeFilters.set(col, new Set(matching));
         else activeFilters.delete(col);
+      }
+      _renderDropdown(col, rawCol, anchorEl, text, false);
+    });
+
+    // Enter: apply selected options to rows.
+    searchInput.addEventListener('keydown', e => {
+      if (e.key !== 'Enter') return;
+      clearTimeout(_filterTimer);
+      const filterInputEl = filterTr.querySelector(`.tbl-filter-input[data-col="${col}"]`);
+      if (onFilter) {
+        const sel = activeCheckboxes.get(col);
+        if (filterInputEl) filterInputEl.value = sel?.size ? [...sel].map(v => labelMap[v] || v).join(' | ') : '';
+        _fetchFiltered();
+      } else {
+        const sel = activeFilters.get(col);
+        if (filterInputEl) filterInputEl.value = sel?.size ? [...sel].map(v => labelMap[v] || v).join(' | ') : '';
         _renderRows();
-        _renderDropdown(col, rawCol, anchorEl, text, false);
+        _closeDropdown();
       }
     });
 
     dropdown.querySelector('.tfd-check-all').addEventListener('change', e => {
       const text = dropdown.querySelector('.tfd-search').value;
-      const vis  = text ? allVals.filter(v => _matchesPattern(v, text)) : allVals;
+      const vis  = text ? allVals.filter(v => _matchesLabel(v, text)) : allVals;
       if (onFilter) {
         const sel = new Set(activeCheckboxes.get(col) || []);
         if (e.target.checked) vis.forEach(v => sel.add(v));
@@ -503,8 +674,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
       _rowHeight = sampleTr ? sampleTr.offsetHeight || 28 : 28;
     }
 
-    const filtered   = _getFilteredRows();
-    const totalShown = Math.min(filtered.length, PREVIEW_LIMIT);
+    const totalShown = Math.min(_filteredCache.length, PREVIEW_LIMIT);
     const theadH     = thead.offsetHeight;
     const scrolled   = Math.max(0, wrapEl.scrollTop - theadH);
     const firstRow   = Math.floor(scrolled / _rowHeight) + 1;
@@ -528,6 +698,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
   wrapEl._filterCleanup = () => {
     document.removeEventListener('click', _onDocClick);
     wrapEl.removeEventListener('scroll', _onWrapScroll);
+    _disposeBatchObserver();
     clearTimeout(_hideScrollTimer);
     clearTimeout(_filterTimer);
     if (stickyFrame) cancelAnimationFrame(stickyFrame);
@@ -540,6 +711,17 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
   _buildHeaders();
   _renderRows();
   wrapEl.replaceChildren(container);
+
+  // ── Measure + save column widths after first paint ────────────────────────
+  if (onSaveColWidths) {
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      const widths = {};
+      headerTr.querySelectorAll('th').forEach((th, i) => {
+        if (cols[i]) widths[cols[i]] = th.offsetWidth;
+      });
+      onSaveColWidths(widths);
+    }));
+  }
 }
 
 function _esc(str) {

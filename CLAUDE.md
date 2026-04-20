@@ -59,5 +59,7 @@ Flask + `sqlite3`. All API routes require a Bearer token (session stored in `ses
 ## Rules
 
 - Before doing any work, mention how you could verify that work.
+- Before implementing any new feature, analyze and explicitly state its performance impact: which endpoints or code paths are affected, estimated extra DB queries or computation per request, and any risk of slowdown. Warn the user if the impact is non-trivial before writing any code.
 - All data storage must use **SQLite** — no JSON files for data, regardless of size.
 - Test/debug Excel files go in `test-excel/`.
+- Before implementing any feature that involves SAP table structure (columns, key fields, relationships), always query DD03L first to inspect the actual metadata. Key fields (`KEYFLAG='X'`) must always be included when creating or joining tables — never assume key fields from SAP knowledge alone, derive them from DD03L.

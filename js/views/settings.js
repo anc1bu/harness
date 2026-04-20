@@ -14,7 +14,7 @@ export function mount(container) {
 
   container.innerHTML = `
     <div id="topbar">
-      <div class="logo">HARNESS <span>//</span> SAPCONS</div>
+      <div class="logo">HARNESS</div>
       <div style="display:flex;gap:8px">
         <button class="btn inline" id="btn-back" style="margin:0">Back to Dashboard</button>
         <button class="btn inline danger" id="btn-logout" style="margin:0">Logout</button>

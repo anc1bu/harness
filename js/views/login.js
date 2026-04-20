@@ -11,7 +11,7 @@ export function mount(container) {
   container.innerHTML = `
     <div id="login-view">
       <div class="login-box" id="step-creds">
-        <div class="login-title">Harness <span style="color:var(--accent2)">//</span> Sapcons</div>
+        <div class="login-title">Harness</div>
         <div class="login-error" id="login-error"></div>
         <div class="ctrl-label">Username</div>
         <input type="text" id="login-username" autocomplete="username" />

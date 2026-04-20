@@ -28,12 +28,14 @@ export function mount(container) {
   _startClock(container);
   _loadTablesMeta(container);
   _initUpload(container);
+  _initResize();
+  _initSectionToggles(container);
 
   const user     = getState('user');
   const customer = getState('customer');
 
   const custLabel = container.querySelector('#customer-badge');
-  if (customer) custLabel.textContent = `${customer.custname} — ${customer.name}`;
+  if (customer) custLabel.textContent = `${customer.custname} ${customer.name}`;
 
   const menuItems = [
     ...(user?.is_admin ? [{ label: 'Admin Page', action: () => navigate('#/admin') }] : []),
@@ -45,25 +47,32 @@ export function mount(container) {
 
 // ── HTML ───────────────────────────────────────────────────────────────────
 
-function _tableSection(id, label, tbodyId) {
+function _tableSection(id, label, tbodyId, section) {
   return `
-    <div id="${id}">
-      <div class="ctrl-label" style="padding:10px 12px 6px;">${label}</div>
-      <table class="meta-table">
-        <thead>
-          <tr>
-            <th>Table</th>
-            <th>System</th>
-            <th>Client</th>
-            <th>Date</th>
-            <th>Entry</th>
-            <th>Action</th>
-          </tr>
-        </thead>
-        <tbody id="${tbodyId}">
-          <tr><td colspan="6" class="meta-empty">No tables uploaded</td></tr>
-        </tbody>
-      </table>
+    <div id="${id}" class="section-wrap" data-section="${section}">
+      <div class="ctrl-label section-hdr" style="padding:10px 12px 6px;">
+        <span>${label}</span>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <span class="section-count"></span>
+          <span class="section-chevron">▾</span>
+        </div>
+      </div>
+      <div class="section-body">
+        <table class="meta-table">
+          <thead>
+            <tr>
+              <th>Table</th>
+              <th>Description</th>
+              <th>Date</th>
+              <th>Entry</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody id="${tbodyId}">
+            <tr><td colspan="5" class="meta-empty">No tables uploaded</td></tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   `;
 }
@@ -71,7 +80,7 @@ function _tableSection(id, label, tbodyId) {
 function _html() {
   return `
     <div id="topbar">
-      <div class="logo">HARNESS <span>//</span> SAPCONS</div>
+      <div class="logo">HARNESS</div>
       <div style="display:flex;align-items:center;gap:16px">
         <div class="cust-badge" id="customer-badge"></div>
         <div class="clock" id="clock">--:--:--</div>
@@ -80,8 +89,9 @@ function _html() {
     </div>
     <div id="layout">
       <div class="panel" id="panel-control">
-        <div class="panel-header"><div class="ph-dot"></div>CONTROL PANEL</div>
+        <div class="panel-header"><div class="ph-dot"></div>CONTROL PANEL<span id="sys-client-label" style="color:var(--text-dim);font-weight:400;letter-spacing:1px;"></span></div>
         <div class="panel-body" style="padding:0;display:flex;flex-direction:column;gap:0;">
+          <div id="panel-resize"></div>
 
           <div class="drop-zone" id="drop-zone">
             <div class="dz-icon">⬆</div>
@@ -90,9 +100,9 @@ function _html() {
           </div>
           <div class="upload-status" id="upload-status"></div>
 
-          ${_tableSection('custom-tables-wrap', 'Customizing Tables', 'custom-meta-tbody')}
-          ${_tableSection('secondary-tables-wrap', 'Secondary Tables', 'secondary-meta-tbody')}
-          ${_tableSection('basis-tables-wrap', 'Basis Tables', 'basis-meta-tbody')}
+          ${_tableSection('custom-tables-wrap',     'Customizing Tables', 'custom-meta-tbody',     'customizing')}
+          ${_tableSection('secondary-tables-wrap',  'Secondary Tables',   'secondary-meta-tbody',  'secondary')}
+          ${_tableSection('basis-tables-wrap',      'Basis Tables',       'basis-meta-tbody',      'basis')}
 
         </div>
       </div>
@@ -100,7 +110,10 @@ function _html() {
       <div class="panel" id="panel-table">
         <div class="panel-header" style="justify-content:space-between;">
           <div style="display:flex;align-items:center;gap:8px;"><div class="ph-dot"></div>DATA TABLE</div>
-          <span id="table-name-label" style="color:var(--accent2);font-size:10px;letter-spacing:2px;"></span>
+          <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+            <span id="table-name-label" style="color:var(--accent2);font-size:10px;letter-spacing:2px;white-space:nowrap;"></span>
+            <span id="table-desc-label" style="color:var(--text-dim);font-size:10px;letter-spacing:0.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
+          </div>
         </div>
         <div class="panel-body" style="padding:0;">
           <div class="empty-state" id="table-empty" style="height:100%">
@@ -140,14 +153,88 @@ function _startClock(container) {
 
 async function _loadTablesMeta(container) {
   try {
-    const [tables, assignments] = await Promise.all([
+    const [info, assignments, sectionStates] = await Promise.all([
       api.get('/api/tables/info'),
       api.get('/api/panel-assignments'),
+      api.get('/api/panel-sections'),
     ]);
+    const { tables, system_client: sysClient } = info;
+    const label = container.querySelector('#sys-client-label');
+    if (label) label.textContent = sysClient ? ` (${sysClient})` : '';
     _renderTablesMeta(container, tables, assignments);
+    _applySectionStates(container, sectionStates);
+    _autoFitControlPanel();
   } catch (err) {
     toast(`Failed to load tables: ${err.message}`, 'err');
   }
+}
+
+function _updateSectionCount(container, tbodyId) {
+  const tbody = container.querySelector(`#${tbodyId}`);
+  if (!tbody) return;
+  const wrap  = tbody.closest('.section-wrap');
+  if (!wrap) return;
+  const count = tbody.querySelectorAll('.mt-row').length;
+  const badge = wrap.querySelector('.section-count');
+  if (badge) badge.textContent = `${count} table${count !== 1 ? 's' : ''}`;
+}
+
+function _applySectionStates(container, states) {
+  container.querySelectorAll('.section-wrap').forEach(wrap => {
+    const section = wrap.dataset.section;
+    wrap.classList.toggle('section-collapsed', !!states[section]);
+  });
+}
+
+function _initSectionToggles(container) {
+  container.querySelectorAll('.section-hdr').forEach(hdr => {
+    hdr.addEventListener('click', async () => {
+      const wrap      = hdr.closest('.section-wrap');
+      const section   = wrap.dataset.section;
+      const collapsed = wrap.classList.toggle('section-collapsed');
+      try { await api.post('/api/panel-sections', { section, collapsed }); } catch {}
+    });
+  });
+}
+
+function _autoFitControlPanel() {
+  const layout = document.getElementById('layout');
+  const ctrl   = document.getElementById('panel-control');
+  if (!layout || !ctrl) return;
+  layout.style.gridTemplateColumns = 'max-content 1fr';
+  requestAnimationFrame(() => {
+    const w = Math.max(320, Math.min(ctrl.offsetWidth + 2, Math.round(window.innerWidth * 0.6)));
+    layout.style.gridTemplateColumns = `${w}px 1fr`;
+  });
+}
+
+function _initResize() {
+  const handle = document.getElementById('panel-resize');
+  const layout = document.getElementById('layout');
+  if (!handle || !layout) return;
+
+  handle.addEventListener('mousedown', e => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = document.getElementById('panel-control').offsetWidth;
+    handle.classList.add('resizing');
+    document.body.style.cursor    = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    const onMove = e => {
+      const w = Math.max(280, startW + (e.clientX - startX));
+      layout.style.gridTemplateColumns = `${w}px 1fr`;
+    };
+    const onUp = () => {
+      handle.classList.remove('resizing');
+      document.body.style.cursor    = '';
+      document.body.style.userSelect = '';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
 }
 
 function _renderTablesMeta(container, tables, assignments = {}) {
@@ -164,14 +251,16 @@ function _renderTablesMeta(container, tables, assignments = {}) {
   _fillBasisTbody(basisTbody, basisTables, container);
   _fillDraggableTbody(customTbody,    customTables,    'customizing', 'No customizing tables', container);
   _fillDraggableTbody(secondaryTbody, secondaryTables, 'secondary',   'No secondary tables',   container);
+  _updateSectionCount(container, 'basis-meta-tbody');
+  _updateSectionCount(container, 'custom-meta-tbody');
+  _updateSectionCount(container, 'secondary-meta-tbody');
 }
 
 function _rowHtml(t, draggable = false) {
   return `
-    <tr class="mt-row${draggable ? ' mt-draggable' : ''}" data-table="${t.table}" data-orig-table="${t.orig_table}" style="cursor:pointer;" ${draggable ? 'draggable="true"' : ''}>
+    <tr class="mt-row${draggable ? ' mt-draggable' : ''}" data-table="${t.table}" data-orig-table="${t.orig_table}" data-description="${t.description || ''}" style="cursor:pointer;" ${draggable ? 'draggable="true"' : ''}>
       <td class="mt-name">${draggable ? '<span class="mt-drag-handle" title="Drag to move">⠿</span> ' : ''}${t.orig_table}</td>
-      <td>${t.system}</td>
-      <td>${t.client}</td>
+      <td class="mt-desc-td"><span class="mt-desc">${t.description || ''}</span></td>
       <td>${t.date}</td>
       <td>${t.count}</td>
       <td><button class="btn danger mt-del" data-table="${t.table}" style="padding:2px 8px;font-size:10px;">DELETE</button></td>
@@ -189,7 +278,7 @@ function _bindTbody(tbody, container) {
   tbody.querySelectorAll('.mt-row').forEach(row => {
     row.addEventListener('click', () => {
       if (container._tableLoading) return;
-      _loadTableData(container, row.dataset.table, row.dataset.origTable);
+      _loadTableData(container, row.dataset.table, row.dataset.origTable, row.dataset.description);
     });
   });
 }
@@ -197,7 +286,7 @@ function _bindTbody(tbody, container) {
 function _fillDraggableTbody(tbody, tables, panel, emptyMsg, container) {
   tbody.innerHTML = tables.length
     ? tables.map(t => _rowHtml(t, true)).join('')
-    : `<tr><td colspan="6" class="meta-empty">${emptyMsg}</td></tr>`;
+    : `<tr><td colspan="5" class="meta-empty">${emptyMsg}</td></tr>`;
   _bindTbody(tbody, container);
   _bindDragDrop(tbody, panel, container);
 }
@@ -252,7 +341,6 @@ function _fillBasisTbody(tbody, tables, container) {
       html += `
         <tr>
           <td class="mt-name" style="color:var(--text-dim)">${name}</td>
-          <td style="color:var(--text-dim)">—</td>
           <td style="color:var(--text-dim)">—</td>
           <td style="color:var(--text-dim)">—</td>
           <td style="color:var(--text-dim)">—</td>
@@ -489,7 +577,10 @@ function _injectPendingRow(container, tableName, system, client, date) {
 
 // ── Table data ─────────────────────────────────────────────────────────────
 
-async function _loadTableData(container, table, origTable) {
+async function _loadTableData(container, table, origTable, description = '') {
+  const _lt0 = performance.now();
+  console.log(`[loadTable] ▶ click → fetch start  (${origTable})`);
+
   const emptyEl   = container.querySelector('#table-empty');
   const wrapEl    = container.querySelector('#table-wrap');
   const nameLabel = container.querySelector('#table-name-label');
@@ -502,7 +593,7 @@ async function _loadTableData(container, table, origTable) {
   wrapEl.innerHTML = '<div class="tbl-loading"><div class="tbl-spinner"></div><span>Loading…</span></div>';
 
   const _fetchData = (filters = {}) => {
-    const params = new URLSearchParams({ offset: 0, limit: 5000 });
+    const params = new URLSearchParams({ offset: 0, limit: 10000 });
     for (const [col, pat] of Object.entries(filters)) {
       if (pat) params.set(`f.${col}`, pat);
     }
@@ -511,6 +602,8 @@ async function _loadTableData(container, table, origTable) {
 
   try {
     const data = await _fetchData();
+    const _lt1 = performance.now();
+    console.log(`[loadTable] ✔ server response    +${(_lt1-_lt0).toFixed(0)}ms  (${data.rows?.length} rows, ${data.total} total)`);
 
     // V-Show-1: DD04T missing or empty → error, do not show
     if (data.dd04t_missing) {
@@ -527,6 +620,8 @@ async function _loadTableData(container, table, origTable) {
     }
 
     if (nameLabel) nameLabel.textContent = origTable || '';
+    const descLabel = container.querySelector('#table-desc-label');
+    if (descLabel) descLabel.textContent = description || '';
 
     if (!data.rows || !data.rows.length) {
       emptyEl.style.display = '';
@@ -553,8 +648,12 @@ async function _loadTableData(container, table, origTable) {
         if (pat) params.set(`f.${col}`, pat);
       }
       const res = await api.get(`/api/tables/${encodeURIComponent(table)}/distinct?${params}`);
-      return res.values || [];
+      return { values: res.values || [], labels: res.labels || {} };
     };
+    const onSaveColWidths = (widths) => {
+      api.patch(`/api/tables/${encodeURIComponent(table)}/col-widths`, widths).catch(() => {});
+    };
+    const _lt2 = performance.now();
     renderTable(wrapEl, {
       rows: data.rows,
       columns: data.columns,
@@ -564,7 +663,27 @@ async function _loadTableData(container, table, origTable) {
       onExport,
       onFilter,
       onDistinct,
+      colWidths: data.col_widths || {},
+      onSaveColWidths,
     });
+    const _lt3 = performance.now();
+    console.log(`[loadTable] ✔ renderTable        +${(_lt3-_lt0).toFixed(0)}ms  (buildHTML+innerHTML=${(_lt3-_lt2).toFixed(0)}ms)`);
+    console.log(`[loadTable] ✔ filter inputs READY +${(_lt3-_lt0).toFixed(0)}ms  mode=${allLoaded?'client-side (instant)':'server-side (distinct fetch needed)'}`);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      console.log(`[loadTable] ✔ first paint         +${(performance.now()-_lt0).toFixed(0)}ms`);
+    }));;
+
+    // For server-side tables: prefetch all column distinct values in the background
+    // so filter inputs are never disabled when the user clicks them.
+    if (onDistinct && data.raw_columns?.length) {
+      setTimeout(async () => {
+        const _lp0 = performance.now();
+        for (const rawCol of data.raw_columns) {
+          try { await onDistinct(rawCol, {}); } catch {}
+        }
+        console.log(`[loadTable] ✔ distinct prefetch  +${(performance.now()-_lt0).toFixed(0)}ms total  (${data.raw_columns.length} cols cached in ${(performance.now()-_lp0).toFixed(0)}ms)`);
+      }, 800);
+    }
   } catch (err) {
     toast(`Failed to load table data: ${err.message}`, 'err');
   } finally {

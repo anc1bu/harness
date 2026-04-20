@@ -599,6 +599,7 @@ def init_db():
             orig_table     TEXT,
             table_name     TEXT,
             table_type     TEXT,
+            total_rows     INTEGER,
             rows_inserted  INTEGER,
             error          TEXT,
             created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -609,6 +610,12 @@ def init_db():
             orig_table TEXT    NOT NULL,
             panel      TEXT    NOT NULL DEFAULT 'customizing',
             PRIMARY KEY (user_id, custname, orig_table)
+        );
+        CREATE TABLE IF NOT EXISTS panel_section_states (
+            user_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            section   TEXT    NOT NULL,
+            collapsed INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, section)
         );
     ''')
 
@@ -633,6 +640,8 @@ def init_db():
         )''',
         'ALTER TABLE upload_jobs ADD COLUMN total_rows INTEGER',
         'ALTER TABLE upload_jobs ADD COLUMN phase TEXT',
+        'ALTER TABLE _table_meta ADD COLUMN description TEXT',
+        'ALTER TABLE _table_meta ADD COLUMN col_widths TEXT',
         '''CREATE TABLE IF NOT EXISTS panel_assignments (
             user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             custname   TEXT    NOT NULL,
@@ -842,21 +851,40 @@ def list_tables():
 def list_tables_info():
     custname = _session_custname()
     if not custname:
-        return jsonify([])
+        return jsonify({'tables': [], 'system_client': None})
     with get_db() as conn:
         meta = conn.execute(
-            'SELECT table_name, orig_table, system, client, date, row_count FROM _table_meta '
+            'SELECT table_name, orig_table, system, client, date, row_count, description FROM _table_meta '
             'WHERE custname = ? ORDER BY orig_table',
             (custname,)
         ).fetchall()
-    return jsonify([{
-        'table':      r['table_name'],
-        'orig_table': r['orig_table'] or r['table_name'],
-        'system':     r['system'],
-        'client':     r['client'],
-        'date':       r['date'],
-        'count':      r['row_count'] or 0,
-    } for r in meta])
+
+        if not meta:
+            return jsonify({'tables': [], 'system_client': None})
+
+        # Derive system+client from DD03L if it has rows
+        system_client = None
+        dd03l_row = next((r for r in meta if (r['orig_table'] or '').upper() == 'DD03L'), None)
+        if dd03l_row:
+            cnt = conn.execute(f'SELECT COUNT(*) FROM "{dd03l_row["table_name"]}"').fetchone()[0]
+            if cnt > 0:
+                system_client = f'{dd03l_row["system"]} / {dd03l_row["client"]}'
+
+    warm_rows = [dict(r) | {'custname': custname} for r in meta]
+    threading.Thread(target=_warm_enrichment_cache, args=(warm_rows,), daemon=True).start()
+
+    return jsonify({
+        'tables': [{
+            'table':       r['table_name'],
+            'orig_table':  r['orig_table'] or r['table_name'],
+            'system':      r['system'],
+            'client':      r['client'],
+            'date':        r['date'],
+            'count':       r['row_count'] or 0,
+            'description': (r['description'] or ''),
+        } for r in meta],
+        'system_client': system_client,
+    })
 
 
 @app.delete('/api/tables/<table>')
@@ -872,6 +900,7 @@ def drop_table(table):
             return jsonify({'error': 'Table not found'}), 404
         conn.execute(f'DROP TABLE IF EXISTS "{table}"')
         conn.execute('DELETE FROM _table_meta WHERE table_name = ?', (table,))
+    _invalidate_enrichment_cache()
     return jsonify({'ok': True})
 
 
@@ -888,6 +917,35 @@ def get_panel_assignments():
             (user_id, custname)
         ).fetchall()
     return jsonify({r['orig_table']: r['panel'] for r in rows})
+
+
+@app.get('/api/panel-sections')
+@require_auth
+def get_panel_sections():
+    user_id = _session_user_id()
+    with get_db() as conn:
+        rows = conn.execute(
+            'SELECT section, collapsed FROM panel_section_states WHERE user_id=?', (user_id,)
+        ).fetchall()
+    states = {r['section']: bool(r['collapsed']) for r in rows}
+    return jsonify({s: states.get(s, False) for s in ('customizing', 'secondary', 'basis')})
+
+
+@app.post('/api/panel-sections')
+@require_auth
+def set_panel_section():
+    user_id = _session_user_id()
+    data    = request.json or {}
+    section   = data.get('section', '').strip()
+    collapsed = int(bool(data.get('collapsed', False)))
+    if section not in ('customizing', 'secondary', 'basis'):
+        return jsonify({'error': 'Invalid section'}), 400
+    with get_db() as conn:
+        conn.execute(
+            'INSERT OR REPLACE INTO panel_section_states (user_id, section, collapsed) VALUES (?,?,?)',
+            (user_id, section, collapsed)
+        )
+    return jsonify({'ok': True})
 
 
 @app.post('/api/panel-assignments')
@@ -907,6 +965,81 @@ def set_panel_assignment():
         )
     return jsonify({'ok': True})
 
+
+# ── DD02T description helpers ──────────────────────────────────────────────
+
+def _fill_description(conn, db_table_name, custname, system, orig_table):
+    """Populate _table_meta.description from DD02T for a single table.
+    No-op if DD02T is not yet uploaded."""
+    dd02t_db = f'{custname}_{system}_DD02T'
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (dd02t_db,)
+    ).fetchone():
+        return
+    row = conn.execute(
+        f'SELECT DDTEXT FROM "{dd02t_db}" WHERE TABNAME=? AND DDLANGUAGE=?',
+        (orig_table.upper(), 'EN')
+    ).fetchone()
+    if row:
+        conn.execute(
+            'UPDATE _table_meta SET description=? WHERE table_name=?',
+            ((row['DDTEXT'] or '').strip(), db_table_name)
+        )
+
+
+def _backfill_dd02t_descriptions(conn, custname, system):
+    """After DD02T upload: fill description for every table already in _table_meta."""
+    dd02t_db = f'{custname}_{system}_DD02T'
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (dd02t_db,)
+    ).fetchone():
+        return
+    desc_map = {
+        r['TABNAME']: (r['DDTEXT'] or '').strip()
+        for r in conn.execute(
+            f'SELECT TABNAME, DDTEXT FROM "{dd02t_db}" WHERE DDLANGUAGE=?', ('EN',)
+        ).fetchall()
+    }
+    for row in conn.execute(
+        'SELECT table_name, orig_table FROM _table_meta WHERE custname=?', (custname,)
+    ).fetchall():
+        desc = desc_map.get((row['orig_table'] or '').upper(), '')
+        if desc:
+            conn.execute(
+                'UPDATE _table_meta SET description=? WHERE table_name=?',
+                (desc, row['table_name'])
+            )
+
+# ── Upload gate (DD03L-first enforcement + system/client lock) ─────────────
+
+def _check_upload_gate(conn, custname, table_name, system, client):
+    """Returns an error string if the upload should be blocked, else None.
+
+    Rules:
+    - If DD03L has no rows yet: only DD03L may be uploaded.
+    - If DD03L has rows: any table is allowed, but system+client must match.
+    """
+    dd03l_meta = conn.execute(
+        "SELECT table_name, system, client FROM _table_meta WHERE custname=? AND orig_table='DD03L'",
+        (custname,)
+    ).fetchone()
+
+    dd03l_has_rows = False
+    if dd03l_meta:
+        try:
+            cnt = conn.execute(f'SELECT COUNT(*) FROM "{dd03l_meta["table_name"]}"').fetchone()[0]
+            dd03l_has_rows = cnt > 0
+        except Exception:
+            pass
+
+    if not dd03l_has_rows:
+        if table_name.upper() != 'DD03L':
+            return 'DD03L must be uploaded first before any other table.'
+    else:
+        if system != dd03l_meta['system'] or client != dd03l_meta['client']:
+            return (f'System/client mismatch. Expected {dd03l_meta["system"]} / '
+                    f'{dd03l_meta["client"]} but the file contains {system} / {client}.')
+    return None
 
 # ── Upload route ───────────────────────────────────────────────────────────
 
@@ -933,6 +1066,11 @@ def upload_excel():
 
     if table_name.lower() in _SYSTEM_TABLES:
         return jsonify({'error': f'Table "{table_name}" is protected'}), 403
+
+    with get_db() as conn:
+        gate_err = _check_upload_gate(conn, custname, table_name, system, client)
+    if gate_err:
+        return jsonify({'error': gate_err}), 422
 
     db_table_name = f'{custname}_{system}_{table_name}'
     dd03l_db_name = f'{custname}_{system}_DD03L'
@@ -1010,8 +1148,8 @@ def upload_excel():
     job_id = secrets.token_hex(8)
     with get_db() as conn:
         conn.execute(
-            'INSERT INTO upload_jobs (job_id, custname, status) VALUES (?, ?, ?)',
-            (job_id, custname, 'pending')
+            'INSERT INTO upload_jobs (job_id, custname, status, phase, rows_inserted) VALUES (?, ?, ?, ?, ?)',
+            (job_id, custname, 'pending', 'queued', 0)
         )
 
     # Write file bytes to a temp file so the background thread reads from disk
@@ -1055,6 +1193,7 @@ def _bg_insert(job_id, custname, file_path, headers, data_rows,
             v3_offender       = None
             v3_mismatch       = None
             excel_dd03l_rows  = {}  # pk_tuple -> {col: val} for row-by-row comparison
+            scan_row_count    = 0
 
             # Load existing DD03L rows from DB (keyed by PK) for comparison
             db_dd03l_rows = {}
@@ -1072,6 +1211,7 @@ def _bg_insert(job_id, custname, file_path, headers, data_rows,
             dd03l_in_db = bool(db_dd03l_rows)
 
             for row in _stream_xlsx_rows(file_path, n):
+                scan_row_count += 1
                 tab = str(row[tabname_idx]).strip().upper()  if tabname_idx   is not None and row[tabname_idx]   else None
                 fld = str(row[fieldname_idx]).strip()        if fieldname_idx is not None and row[fieldname_idx] else None
                 flg = str(row[keyflag_idx]).strip().upper()  if keyflag_idx   is not None and row[keyflag_idx]   else None
@@ -1127,10 +1267,20 @@ def _bg_insert(job_id, custname, file_path, headers, data_rows,
                 ).fetchall()
                 key_fields = {r[0].strip() for r in rows if r[0] is not None}
 
-        # ── Count total rows so the frontend can show a determinate progress bar ──
-        total_rows = _count_xlsx_rows(file_path)
+        # ── Publish total_rows + table identity now that validation passed ────────
+        # Master: row count is free — already known from the validation scan.
+        # Others: requires a dedicated full-file pass; show phase='counting' while waiting.
+        if table_type == 'master':
+            total_rows = scan_row_count
+        else:
+            with get_db() as conn:
+                conn.execute('UPDATE upload_jobs SET phase=? WHERE job_id=?', ('counting', job_id))
+            total_rows = _count_xlsx_rows(file_path)
         with get_db() as conn:
-            conn.execute('UPDATE upload_jobs SET total_rows=? WHERE job_id=?', (total_rows, job_id))
+            conn.execute(
+                'UPDATE upload_jobs SET total_rows=?, table_name=?, table_type=? WHERE job_id=?',
+                (total_rows, db_table_name, table_type, job_id),
+            )
 
         # ── Build column definitions ───────────────────────────────────────────
         def _col_def(h):
@@ -1166,8 +1316,11 @@ def _bg_insert(job_id, custname, file_path, headers, data_rows,
                 'VALUES (?, ?, ?, ?, ?, ?)',
                 (db_table_name, custname, table_name, system, client, date)
             )
+            _fill_description(conn, db_table_name, custname, system, table_name)
 
         # ── Insert in batches — commit each batch, update progress after each ──
+        with get_db() as conn:
+            conn.execute('UPDATE upload_jobs SET phase=? WHERE job_id=?', ('inserting', job_id))
         rows_inserted = 0
         for batch in _batched(row_source, 1000):
             with get_db() as conn:
@@ -1203,6 +1356,22 @@ def _bg_insert(job_id, custname, file_path, headers, data_rows,
             with get_db() as conn:
                 conn.execute(f'CREATE INDEX IF NOT EXISTS "idx_{db_table_name}_tabname" ON "{db_table_name}" (TABNAME)')
                 conn.execute(f'CREATE INDEX IF NOT EXISTS "idx_{db_table_name}_tabname_fieldname" ON "{db_table_name}" (TABNAME, FIELDNAME)')
+
+        # If DD08L was just uploaded, index CHECKTABLE for fast enrichment lookups
+        if table_name.upper() == 'DD08L':
+            with get_db() as conn:
+                conn.execute(
+                    f'CREATE INDEX IF NOT EXISTS "idx_{db_table_name}_checktable" '
+                    f'ON "{db_table_name}" (CHECKTABLE, FRKART, AS4LOCAL)'
+                )
+
+        # If DD02T was just uploaded, backfill descriptions for all existing tables
+        if table_name.upper() == 'DD02T':
+            with get_db() as conn:
+                _backfill_dd02t_descriptions(conn, custname, system)
+
+        # Invalidate enrichment cache so fresh metadata is used after any upload
+        _invalidate_enrichment_cache()
 
         with get_db() as conn:
             conn.execute(
@@ -1243,10 +1412,49 @@ def upload_status(job_id):
     return jsonify(dict(job))
 
 
+# ── Enrichment cache ──────────────────────────────────────────────────────
+# Keyed by (orig_table, custname, system, skip_text_cols).
+# Invalidated on every upload or delete so stale metadata is never served.
+# Per-worker (gunicorn): cross-worker invalidation is not needed since
+# uploads are infrequent and each worker self-heals on the next request.
+
+_enrichment_cache: dict = {}
+_vtext_cache:      dict = {}  # (t683t_table_name) -> vtext_map
+
+def _invalidate_enrichment_cache():
+    _enrichment_cache.clear()
+    _vtext_cache.clear()
+
+def _warm_enrichment_cache(tables_meta):
+    """Background: pre-populate _enrichment_cache for every table so first click is instant."""
+    try:
+        with get_db() as conn:
+            for r in tables_meta:
+                key = (r['orig_table'], r['custname'], r['system'], frozenset())
+                if key in _enrichment_cache:
+                    continue
+                try:
+                    raw_cols = [row[1] for row in conn.execute(f'PRAGMA table_info("{r["table_name"]}")')]
+                    if raw_cols:
+                        _cached_setup_enrichment(conn, r['orig_table'], r['custname'], r['system'], raw_cols)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+def _cached_setup_enrichment(conn, orig_table, custname, system, raw_cols, skip_text_cols=frozenset()):
+    key = (orig_table, custname, system, skip_text_cols)
+    if key in _enrichment_cache:
+        return _enrichment_cache[key]
+    result = _setup_enrichment(conn, orig_table, custname, system, raw_cols, skip_text_cols)
+    _enrichment_cache[key] = result
+    return result
+
 # ── Enrichment helpers ────────────────────────────────────────────────────
 
-def _setup_enrichment(conn, orig_table, custname, system, raw_cols):
-    """Prefetch all lookup metadata for a table's columns. Touches no row data."""
+def _setup_enrichment(conn, orig_table, custname, system, raw_cols, skip_text_cols=frozenset()):
+    """Prefetch all lookup metadata for a table's columns. Touches no row data.
+    skip_text_cols: column names to exclude from text-table lookup and preload."""
     dd03l_name = f'{custname}_{system}_DD03L'
     dd04t_name = f'{custname}_{system}_DD04T'
     dd08l_name = f'{custname}_{system}_DD08L'
@@ -1415,6 +1623,8 @@ def _setup_enrichment(conn, orig_table, custname, system, raw_cols):
                     text_field_map[r['TABNAME']] = r['FIELDNAME']
 
         for col in raw_cols:
+            if col in skip_text_cols:
+                continue  # Caller handles this column separately; skip preload
             checktable = checktable_for_col.get(col)
             if not checktable:
                 continue
@@ -1455,7 +1665,7 @@ def _setup_enrichment(conn, orig_table, custname, system, raw_cols):
             }
 
         for field, tt in self_text_map.items():
-            if field not in raw_cols or field in col_lookup or field in col_hints:
+            if field not in raw_cols or field in col_lookup or field in col_hints or field in skip_text_cols:
                 continue
             text_db = f'{custname}_{system}_{tt}'
             if text_db not in existing_tables:
@@ -1475,7 +1685,7 @@ def _setup_enrichment(conn, orig_table, custname, system, raw_cols):
 
     if dd03l_exists:
         for col in raw_cols:
-            if col in col_lookup or col in col_hints:
+            if col in col_lookup or col in col_hints or col in skip_text_cols:
                 continue
             info = src_dd03l.get(col)
             if not info or not info['domname']:
@@ -1529,7 +1739,10 @@ def _setup_enrichment(conn, orig_table, custname, system, raw_cols):
         if cfg is None:
             plain_pairs.append((raw_col, enriched_col))
         elif cfg.get('source') == 'dd07t':
-            dd07t_triples.append((raw_col, enriched_col, cfg))
+            if cfg.get('_preload'):  # empty preload → no domain values → treat as plain
+                dd07t_triples.append((raw_col, enriched_col, cfg))
+            else:
+                plain_pairs.append((raw_col, enriched_col))
         else:
             text_triples.append((raw_col, enriched_col, cfg))
 
@@ -1579,6 +1792,103 @@ def _enrich_row(row_d, plain_pairs, dd07t_triples, text_triples):
     return enriched_row, dd07t_miss
 
 
+def _enrich_rows_batch(raw_rows, plain_pairs, dd07t_triples, text_triples):
+    """Vectorized batch enrichment — column-major order avoids 5000 function calls
+    and keeps preload/cfg lookups out of the inner loop. Returns (rows_out, dd07t_miss_all)."""
+    n = len(raw_rows)
+    rows_out      = [{} for _ in range(n)]
+    dd07t_miss_all = set()
+
+    for rc, ec in plain_pairs:
+        for i, row in enumerate(raw_rows):
+            rows_out[i][ec] = row[rc]
+
+    for rc, ec, cfg in dd07t_triples:
+        preload = cfg['_preload']
+        for i, row in enumerate(raw_rows):
+            val = row[rc]
+            if val is not None and str(val).strip():
+                desc = preload.get(str(val))
+                if not desc:
+                    dd07t_miss_all.add(rc)
+                rows_out[i][ec] = f'{val} - {desc}' if desc else val
+            else:
+                rows_out[i][ec] = val
+
+    for rc, ec, cfg in text_triples:
+        preload       = cfg['_preload']
+        avail_kfs     = cfg.get('_available_kfs') or []
+        tkf           = cfg.get('text_key_field', rc)
+        if not avail_kfs:
+            for i, row in enumerate(raw_rows):
+                rows_out[i][ec] = row[rc]
+            continue
+        for i, row in enumerate(raw_rows):
+            val       = row[rc]
+            key_vals  = tuple(row[rc] if kf == tkf and tkf != rc else row[kf] for kf in avail_kfs)
+            if not any(v is None or str(v).strip() == '' for v in key_vals):
+                desc  = preload.get(key_vals)
+                rows_out[i][ec] = f'{val} - {desc}' if desc else val
+            else:
+                rows_out[i][ec] = val
+
+    return rows_out, dd07t_miss_all
+
+
+# ── T683S special enrichment (exceptional case) ────────────────────────────
+# T683S rows where KSCHL is empty are subtotal lines described by T683T.
+# STUNR and ZAEHK are excluded from the standard DD08L enrichment pipeline
+# via skip_text_cols in _setup_enrichment — this prevents T683T's VTEXT
+# from being loaded twice and displayed in the wrong columns.
+
+def _t683s_pre_enrich(conn, custname):
+    """Fetch T683T metadata for reuse by _t683s_post_enrich. Returns the
+    _table_meta row for T683T, or None if not yet uploaded."""
+    return conn.execute(
+        "SELECT table_name FROM _table_meta WHERE orig_table='T683T' AND custname=?",
+        (custname,)
+    ).fetchone()
+
+
+def _t683s_post_enrich(conn, t683t_meta, enr, raw_rows, rows_out):
+    """After _enrich_row: if T683T is uploaded, inject its VTEXT into empty
+    KSCHL cells (matched via composite key). If not uploaded, add a tooltip
+    hint to the KSCHL column header."""
+    raw_cols   = list(raw_rows[0].keys())
+    if 'KSCHL' not in raw_cols:
+        return
+    kschl_ecol = enr['enriched_cols'][raw_cols.index('KSCHL')]
+    JOIN_KEYS  = ('KVEWE', 'KAPPL', 'KALSM', 'STUNR', 'ZAEHK')
+
+    if not t683t_meta:
+        enr['col_hints'].setdefault('KSCHL', []).append(
+            'Upload T683T table to see subtotal descriptions'
+        )
+        return
+
+    t683t_tbl = t683t_meta['table_name']
+    if t683t_tbl in _vtext_cache:
+        vtext_map = _vtext_cache[t683t_tbl]
+    else:
+        t683t_cols = {r[1] for r in conn.execute(f'PRAGMA table_info("{t683t_tbl}")')}
+        if not (all(k in t683t_cols for k in JOIN_KEYS) and 'VTEXT' in t683t_cols):
+            return
+        vtext_map = {}
+        for r in conn.execute(
+            f'SELECT KVEWE, KAPPL, KALSM, STUNR, ZAEHK, VTEXT FROM "{t683t_tbl}" WHERE SPRAS=?',
+            ('EN',)
+        ).fetchall():
+            vt = (r['VTEXT'] or '').strip()
+            if vt:
+                vtext_map[(r['KVEWE'], r['KAPPL'], r['KALSM'], r['STUNR'], r['ZAEHK'])] = vt
+        _vtext_cache[t683t_tbl] = vtext_map
+
+    for raw_row, row in zip(raw_rows, rows_out):
+        if raw_row['KSCHL'] is None or str(raw_row['KSCHL']).strip() == '':
+            vtext = vtext_map.get(tuple(raw_row[k] for k in JOIN_KEYS))
+            if vtext:
+                row[kschl_ecol] = vtext
+
 # ── Table data route ───────────────────────────────────────────────────────
 
 @app.get('/api/tables/<table>/data')
@@ -1589,7 +1899,7 @@ def get_table_data(table):
     limit    = max(1, min(int(request.args.get('limit', 5000)), 10000))
     with get_db() as conn:
         meta = conn.execute(
-            'SELECT orig_table, system FROM _table_meta WHERE table_name = ? AND custname = ?',
+            'SELECT orig_table, system, col_widths FROM _table_meta WHERE table_name = ? AND custname = ?',
             (table, custname)
         ).fetchone()
         if not meta:
@@ -1597,6 +1907,7 @@ def get_table_data(table):
 
         orig_table = meta['orig_table'] or table
         system     = meta['system']
+        col_widths = json.loads(meta['col_widths']) if meta['col_widths'] else {}
 
         # Get valid column names to whitelist filter params
         try:
@@ -1620,22 +1931,22 @@ def get_table_data(table):
                             'dd04t_missing': False, 'dd08l_missing': False, 'partial_descriptions': False,
                             'missing_fields': [], 'col_text_tables': {}})
 
-        raw_cols = list(raw_rows[0].keys())
-        enr = _setup_enrichment(conn, orig_table, custname, system, raw_cols)
+        raw_cols  = list(raw_rows[0].keys())
+        is_t683s  = orig_table.upper() == 'T683S'
+        skip_cols = frozenset({'STUNR', 'ZAEHK'}) if is_t683s else frozenset()
+        enr = _cached_setup_enrichment(conn, orig_table, custname, system, raw_cols, skip_text_cols=skip_cols)
+
+        _t683t_meta = _t683s_pre_enrich(conn, custname) if is_t683s else None
 
         if enr['all_missing']:
             _log_val_fields(conn, custname, 'V-Show-2', orig_table, enr['all_missing'])
 
-        plain_pairs   = enr['plain_pairs']
-        dd07t_triples = enr['dd07t_triples']
-        text_triples  = enr['text_triples']
+        rows_out, dd07t_miss_all = _enrich_rows_batch(
+            raw_rows, enr['plain_pairs'], enr['dd07t_triples'], enr['text_triples']
+        )
 
-        dd07t_miss_all = set()
-        rows_out = []
-        for row in raw_rows:
-            er, miss = _enrich_row(dict(row), plain_pairs, dd07t_triples, text_triples)
-            rows_out.append(er)
-            dd07t_miss_all |= miss
+        if orig_table.upper() == 'T683S':
+            _t683s_post_enrich(conn, _t683t_meta, enr, raw_rows, rows_out)
 
         col_hints  = enr['col_hints']
         col_lookup = enr['col_lookup']
@@ -1661,7 +1972,21 @@ def get_table_data(table):
         'partial_descriptions': enr['partial_descriptions'],
         'missing_fields':       enr['missing_fields'],
         'col_text_tables':      col_text_tables,
+        'col_widths':           col_widths,
     })
+
+
+@app.patch('/api/tables/<table>/col-widths')
+@require_auth
+def save_col_widths(table):
+    custname = _session_custname()
+    widths = request.get_json(silent=True) or {}
+    with get_db() as conn:
+        conn.execute(
+            'UPDATE _table_meta SET col_widths=? WHERE table_name=? AND custname=?',
+            (json.dumps(widths), table, custname)
+        )
+    return jsonify({'ok': True})
 
 
 @app.get('/api/tables/<table>/export')
@@ -1691,7 +2016,8 @@ def export_table(table):
                             headers={'Content-Disposition': f'attachment; filename="{orig_table}_{system}.csv"'})
 
         raw_cols = list(raw_cols_row.keys())
-        enr = _setup_enrichment(conn, orig_table, custname, system, raw_cols)
+        skip_exp = frozenset({'STUNR', 'ZAEHK'}) if orig_table.upper() == 'T683S' else frozenset()
+        enr = _cached_setup_enrichment(conn, orig_table, custname, system, raw_cols, skip_text_cols=skip_exp)
 
     # Generator opens its own connection so the with-block above can close cleanly
     def generate(table=table, orig_table=orig_table, enr=enr):
@@ -1748,10 +2074,10 @@ def _parse_filter_clauses(args, table_cols, exclude_col=None):
                     where_parts.append(f'"{col}" IN ({ph})')
                     params.extend(vals)
             elif '*' in pat:
-                where_parts.append(f'"{col}" LIKE ?')
+                where_parts.append(f'"{col}" LIKE ? COLLATE NOCASE')
                 params.append(pat.replace('*', '%'))
             else:
-                where_parts.append(f'"{col}" LIKE ?')
+                where_parts.append(f'"{col}" LIKE ? COLLATE NOCASE')
                 params.append(f'%{pat}%')
     return where_parts, params
 
@@ -1765,20 +2091,56 @@ def get_column_distinct(table):
         return jsonify({'error': 'col param required'}), 400
     with get_db() as conn:
         meta = conn.execute(
-            'SELECT 1 FROM _table_meta WHERE table_name=? AND custname=?', (table, custname)
+            'SELECT orig_table, system FROM _table_meta WHERE table_name=? AND custname=?',
+            (table, custname)
         ).fetchone()
         if not meta:
             return jsonify({'error': 'Table not found'}), 404
-        table_cols = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
+        orig_table = meta['orig_table'] or table
+        system     = meta['system']
+        table_cols_list = [row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')]
+        table_cols      = set(table_cols_list)
         if col not in table_cols:
             return jsonify({'error': 'Column not found'}), 404
         where_parts, params = _parse_filter_clauses(request.args, table_cols, exclude_col=col)
         where_sql = ('WHERE ' + ' AND '.join(where_parts)) if where_parts else ''
-        rows = conn.execute(
-            f'SELECT DISTINCT "{col}" FROM "{table}" {where_sql} ORDER BY "{col}" LIMIT 10000',
-            params
-        ).fetchall()
-    return jsonify({'values': ['' if r[0] is None else str(r[0]) for r in rows]})
+        raw_vals = [
+            '' if r[0] is None else str(r[0])
+            for r in conn.execute(
+                f'SELECT DISTINCT "{col}" FROM "{table}" {where_sql} ORDER BY "{col}" LIMIT 10000',
+                params
+            ).fetchall()
+        ]
+
+        # Build description labels for each distinct value
+        labels = {}
+        skip_dist = frozenset({'STUNR', 'ZAEHK'}) if orig_table.upper() == 'T683S' else frozenset()
+        enr = _cached_setup_enrichment(conn, orig_table, custname, system, table_cols_list, skip_text_cols=skip_dist)
+        cfg = enr['col_lookup'].get(col)
+        if cfg:
+            if cfg.get('source') == 'dd07t':
+                preload = cfg.get('_preload', {})
+                for v in raw_vals:
+                    desc = preload.get(v)
+                    if desc:
+                        labels[v] = f'{v} - {desc}'
+            else:
+                avail   = cfg.get('_available_kfs', [])
+                preload = cfg.get('_preload', {})
+                if col in avail and preload:
+                    col_idx = avail.index(col)
+                    # Build first-match reverse lookup keyed by this column's value
+                    val_to_desc = {}
+                    for key_tuple, desc in preload.items():
+                        k = key_tuple[col_idx]
+                        if k not in val_to_desc:
+                            val_to_desc[k] = desc
+                    for v in raw_vals:
+                        desc = val_to_desc.get(v)
+                        if desc:
+                            labels[v] = f'{v} - {desc}'
+
+    return jsonify({'values': raw_vals, 'labels': labels})
 
 
 # ── Customer routes ────────────────────────────────────────────────────────
