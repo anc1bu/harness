@@ -408,7 +408,7 @@ tbody tr.selected td { background: rgba(137,180,250,0.12); color: var(--accent);
 }
 
 /* ── Column header with filter button ──────────────────────────────────── */
-.tbl-col-header { z-index: 2; white-space: nowrap; }
+.tbl-col-header { z-index: 2; white-space: nowrap; cursor: pointer; }
 .tbl-col-header.filter-active { background: rgba(224,176,80,0.07) !important; }
 .tbl-col-header.filter-active .tbl-col-name { color: var(--warn) !important; }
 .tbl-filter-btn {

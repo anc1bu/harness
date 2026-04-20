@@ -161,31 +161,22 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
     });
 
     _bindHeaderEvents();
-    requestAnimationFrame(_fixStickyTop);
+    _fixStickyTop();
   }
 
   function _bindHeaderEvents() {
     filterTr.querySelectorAll('.tbl-filter-input').forEach(inp => {
       const col = inp.dataset.col;
       inp.addEventListener('focus', () => {
-        const _f0 = performance.now();
         const rawCol = enrichedToRaw.get(col) ?? col.split(' - ')[0];
         if (onDistinct && !colDistinctCache.has(rawCol)) {
           inp.disabled    = true;
           inp.placeholder = 'Loading…';
           inp.classList.add('tbl-filter-loading');
-          console.log(`[filterInput] ▶ focus  col=${rawCol}  → disabled (distinct not cached)`);
-        } else {
-          console.log(`[filterInput] ▶ focus  col=${rawCol}  → immediately editable (cached=${colDistinctCache.has(rawCol)}, serverSide=${!!onDistinct})`);
         }
         _openDropdown(col, inp.parentElement, inp.value, false);
       });
-      let _lastKeyTime = 0;
       inp.addEventListener('input', e => {
-        const _t0 = performance.now();
-        const _gap = _lastKeyTime ? (_t0 - _lastKeyTime).toFixed(1) : '–';
-        _lastKeyTime = _t0;
-
         const text = e.target.value;
         if (onFilter) {
           activeFilters.delete(col);
@@ -220,7 +211,6 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
           _openDropdown(col, inp.parentElement, text, false);
         };
         _dropdownTimer = setTimeout(_doDropdown, 400);
-        console.log(`[input] handler=${(performance.now()-_t0).toFixed(2)}ms`);
       });
       inp.addEventListener('keydown', e => {
         if (e.key !== 'Enter') return;
@@ -251,6 +241,19 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
           if (matching.length) activeFilters.set(col, new Set(matching));
           else activeFilters.delete(col);
           _renderRows();
+        }
+      });
+    });
+
+    headerTr.querySelectorAll('.tbl-col-header').forEach(hth => {
+      const col = hth.dataset.col;
+      hth.addEventListener('click', e => {
+        if (e.target.closest('.tbl-filter-btn')) return; // ▾ button has its own handler
+        e.stopPropagation();
+        if (openDropdownCol === col) _closeDropdown();
+        else {
+          const fi = filterTr.querySelector(`.tbl-filter-input[data-col="${col}"]`);
+          _openDropdown(col, hth, fi?.value || '', true);
         }
       });
     });
@@ -396,12 +399,8 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
     _renderDropdown(col, rawCol, anchorEl, searchText, focusSearch);
 
     if (onDistinct && !colDistinctCache.has(rawCol)) {
-      const _od0 = performance.now();
-      console.log(`[filterInput] ⬇ distinct fetch start  col=${rawCol}`);
       colDistinctCache.set(rawCol, null); // mark loading
       onDistinct(rawCol, _buildCurrentFilters(col)).then(vals => {
-        const _od1 = performance.now();
-        console.log(`[filterInput] ✔ distinct fetch done  col=${rawCol}  +${(_od1-_od0).toFixed(0)}ms  (${vals?.values?.length ?? vals?.length ?? 0} values)`);
         colDistinctCache.set(rawCol, vals);
         const headerInp = filterTr.querySelector(`.tbl-filter-input[data-col="${col}"]`);
         if (headerInp?.disabled) {
@@ -409,7 +408,6 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
           headerInp.placeholder = 'search  (Z* = starts with)';
           headerInp.classList.remove('tbl-filter-loading');
           headerInp.focus();
-          console.log(`[filterInput] ✔ input enabled + focused  col=${rawCol}  +${(performance.now()-_od0).toFixed(0)}ms`);
         }
         if (openDropdownCol === col) _renderDropdown(col, rawCol, anchorEl, searchText, focusSearch);
       }).catch(() => {
@@ -419,7 +417,6 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
           headerInp.disabled    = false;
           headerInp.placeholder = 'search  (Z* = starts with)';
           headerInp.classList.remove('tbl-filter-loading');
-          console.log(`[filterInput] ✗ distinct fetch error  col=${rawCol}  → input re-enabled`);
         }
       });
     }
@@ -612,6 +609,8 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
       const actual = cols[idx];
       cols.splice(idx, 1);
       cols.unshift(actual);
+      clearTimeout(_dropdownTimer);
+      clearTimeout(_filterTimer);
       _closeDropdown();
       _buildHeaders();
       _renderRows();

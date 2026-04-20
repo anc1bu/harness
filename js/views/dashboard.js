@@ -578,8 +578,6 @@ function _injectPendingRow(container, tableName, system, client, date) {
 // ── Table data ─────────────────────────────────────────────────────────────
 
 async function _loadTableData(container, table, origTable, description = '') {
-  const _lt0 = performance.now();
-  console.log(`[loadTable] ▶ click → fetch start  (${origTable})`);
 
   const emptyEl   = container.querySelector('#table-empty');
   const wrapEl    = container.querySelector('#table-wrap');
@@ -602,8 +600,6 @@ async function _loadTableData(container, table, origTable, description = '') {
 
   try {
     const data = await _fetchData();
-    const _lt1 = performance.now();
-    console.log(`[loadTable] ✔ server response    +${(_lt1-_lt0).toFixed(0)}ms  (${data.rows?.length} rows, ${data.total} total)`);
 
     // V-Show-1: DD04T missing or empty → error, do not show
     if (data.dd04t_missing) {
@@ -653,7 +649,6 @@ async function _loadTableData(container, table, origTable, description = '') {
     const onSaveColWidths = (widths) => {
       api.patch(`/api/tables/${encodeURIComponent(table)}/col-widths`, widths).catch(() => {});
     };
-    const _lt2 = performance.now();
     renderTable(wrapEl, {
       rows: data.rows,
       columns: data.columns,
@@ -666,22 +661,14 @@ async function _loadTableData(container, table, origTable, description = '') {
       colWidths: data.col_widths || {},
       onSaveColWidths,
     });
-    const _lt3 = performance.now();
-    console.log(`[loadTable] ✔ renderTable        +${(_lt3-_lt0).toFixed(0)}ms  (buildHTML+innerHTML=${(_lt3-_lt2).toFixed(0)}ms)`);
-    console.log(`[loadTable] ✔ filter inputs READY +${(_lt3-_lt0).toFixed(0)}ms  mode=${allLoaded?'client-side (instant)':'server-side (distinct fetch needed)'}`);
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      console.log(`[loadTable] ✔ first paint         +${(performance.now()-_lt0).toFixed(0)}ms`);
-    }));;
 
     // For server-side tables: prefetch all column distinct values in the background
     // so filter inputs are never disabled when the user clicks them.
     if (onDistinct && data.raw_columns?.length) {
       setTimeout(async () => {
-        const _lp0 = performance.now();
         for (const rawCol of data.raw_columns) {
           try { await onDistinct(rawCol, {}); } catch {}
         }
-        console.log(`[loadTable] ✔ distinct prefetch  +${(performance.now()-_lt0).toFixed(0)}ms total  (${data.raw_columns.length} cols cached in ${(performance.now()-_lp0).toFixed(0)}ms)`);
       }, 800);
     }
   } catch (err) {
