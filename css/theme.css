@@ -161,6 +161,18 @@ tbody tr:hover { background: rgba(137,180,250,0.06); }
 tbody td { padding: 6px 10px; color: var(--text); white-space: nowrap; }
 .tbl-container tbody td { overflow: hidden; text-overflow: ellipsis; max-width: 0; }
 tbody tr.selected td { background: rgba(137,180,250,0.12); color: var(--accent); }
+tbody tr.tbl-row-selected td { background: rgba(255, 243, 100, 0.14) !important; }
+tbody tr.tbl-row-selected:hover td { background: rgba(255, 243, 100, 0.20) !important; }
+
+/* ── Row selection checkbox column ─────────────────────────────────────── */
+.tbl-sel-th {
+  width: 32px; min-width: 32px; text-align: center;
+  padding: 0 !important; background: var(--bg);
+}
+.tbl-sel-td {
+  width: 32px; text-align: center; padding: 0 !important; overflow: visible !important;
+}
+.tbl-sel-cb { cursor: pointer; accent-color: var(--warn); }
 
 /* ── Modal ── */
 #modal-overlay {
@@ -391,6 +403,26 @@ tbody tr.selected td { background: rgba(137,180,250,0.12); color: var(--accent);
   padding: 3px 10px; border-radius: 3px; cursor: pointer; transition: background .15s;
 }
 .tbl-clear-all:hover { background: rgba(224,96,96,0.12); }
+.tbl-clear-layout {
+  background: transparent; border: 1px solid var(--accent); color: var(--accent);
+  font-family: inherit; font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase;
+  padding: 3px 10px; border-radius: 3px; cursor: pointer; transition: background .15s;
+}
+.tbl-clear-layout:hover { background: rgba(137,180,250,0.10); }
+
+/* ── Column drag-reorder ─────────────────────────────────────────────────── */
+.tbl-drag-ghost {
+  position: fixed; z-index: 3000; pointer-events: none;
+  background: var(--panel); border: 1px solid var(--accent); color: var(--accent);
+  padding: 4px 10px; border-radius: 4px; font-size: 12px;
+  font-family: 'Courier New', monospace; white-space: nowrap; opacity: 0.92;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+}
+.tbl-drag-line {
+  position: fixed; z-index: 2999; pointer-events: none;
+  width: 2px; background: var(--accent);
+  box-shadow: 0 0 6px var(--accent);
+}
 
 /* ── Filter input row ───────────────────────────────────────────────────── */
 .tbl-filter-th {
@@ -410,7 +442,7 @@ tbody tr.selected td { background: rgba(137,180,250,0.12); color: var(--accent);
 }
 
 /* ── Column header with filter button ──────────────────────────────────── */
-.tbl-col-header { z-index: 2; white-space: nowrap; cursor: pointer; }
+.tbl-col-header { z-index: 2; white-space: nowrap; cursor: grab; }
 .tbl-col-header.filter-active { background: rgba(224,176,80,0.07) !important; }
 .tbl-col-header.filter-active .tbl-col-name { color: var(--warn) !important; }
 .tbl-filter-btn {

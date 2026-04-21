@@ -656,6 +656,12 @@ def init_db():
             parent_panel TEXT    NOT NULL DEFAULT 'customizing',
             sort_order   INTEGER NOT NULL DEFAULT 0
         )''',
+        '''CREATE TABLE IF NOT EXISTS user_table_prefs (
+            user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            table_name TEXT    NOT NULL,
+            col_order  TEXT,
+            PRIMARY KEY (user_id, table_name)
+        )''',
     ]:
         try:
             conn.execute(sql)
@@ -2058,6 +2064,46 @@ def save_col_widths(table):
         conn.execute(
             'UPDATE _table_meta SET col_widths=? WHERE table_name=? AND custname=?',
             (json.dumps(widths), table, custname)
+        )
+    return jsonify({'ok': True})
+
+
+@app.get('/api/tables/<table>/layout')
+@require_auth
+def get_table_layout(table):
+    user_id = _session_user_id()
+    with get_db() as conn:
+        row = conn.execute(
+            'SELECT col_order FROM user_table_prefs WHERE user_id=? AND table_name=?',
+            (user_id, table)
+        ).fetchone()
+    return jsonify({'col_order': json.loads(row['col_order']) if row and row['col_order'] else []})
+
+
+@app.patch('/api/tables/<table>/layout')
+@require_auth
+def save_table_layout(table):
+    user_id = _session_user_id()
+    data = request.get_json(silent=True) or {}
+    col_order = data.get('col_order', [])
+    if not isinstance(col_order, list):
+        return jsonify({'error': 'Invalid payload'}), 400
+    with get_db() as conn:
+        conn.execute(
+            'INSERT OR REPLACE INTO user_table_prefs (user_id, table_name, col_order) VALUES (?,?,?)',
+            (user_id, table, json.dumps(col_order))
+        )
+    return jsonify({'ok': True})
+
+
+@app.delete('/api/tables/<table>/layout')
+@require_auth
+def delete_table_layout(table):
+    user_id = _session_user_id()
+    with get_db() as conn:
+        conn.execute(
+            'DELETE FROM user_table_prefs WHERE user_id=? AND table_name=?',
+            (user_id, table)
         )
     return jsonify({'ok': True})
 

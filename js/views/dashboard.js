@@ -117,8 +117,8 @@ function _html() {
         <div class="panel-header" style="justify-content:space-between;">
           <div style="display:flex;align-items:center;gap:8px;"><div class="ph-dot"></div>DATA TABLE</div>
           <div style="display:flex;align-items:center;gap:10px;min-width:0;">
-            <span id="table-name-label" style="color:var(--accent2);font-size:10px;letter-spacing:2px;white-space:nowrap;"></span>
-            <span id="table-desc-label" style="color:var(--text-dim);font-size:10px;letter-spacing:0.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
+            <span id="table-name-label" style="color:var(--accent2);font-size:13px;letter-spacing:1.5px;white-space:nowrap;font-weight:600;"></span>
+            <span id="table-desc-label" style="color:var(--text-dim);font-size:12px;letter-spacing:0.3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></span>
           </div>
         </div>
         <div class="panel-body" style="padding:0;">
@@ -729,6 +729,13 @@ async function _loadTableData(container, table, origTable, description = '') {
     const onSaveColWidths = (widths) => {
       api.patch(`/api/tables/${encodeURIComponent(table)}/col-widths`, widths).catch(() => {});
     };
+    const layoutData = await api.get(`/api/tables/${encodeURIComponent(table)}/layout`).catch(() => ({}));
+    const onSaveColOrder = (order) => {
+      api.patch(`/api/tables/${encodeURIComponent(table)}/layout`, { col_order: order }).catch(() => {});
+    };
+    const onClearLayout = () => {
+      api['delete'](`/api/tables/${encodeURIComponent(table)}/layout`).catch(() => {});
+    };
     renderTable(wrapEl, {
       rows: data.rows,
       columns: data.columns,
@@ -740,6 +747,9 @@ async function _loadTableData(container, table, origTable, description = '') {
       onDistinct,
       colWidths: data.col_widths || {},
       onSaveColWidths,
+      colOrder: layoutData.col_order || [],
+      onSaveColOrder,
+      onClearLayout,
     });
 
     // For server-side tables: prefetch all column distinct values in the background

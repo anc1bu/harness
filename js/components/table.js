@@ -3,7 +3,7 @@
 const PREVIEW_LIMIT = 5000;
 const MAX_DROPDOWN_VALS = 500;
 
-export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], colTextTables = {}, total: initTotal, onExport, onFilter, onDistinct, colWidths = {}, onSaveColWidths }) {
+export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], colTextTables = {}, total: initTotal, onExport, onFilter, onDistinct, colWidths = {}, onSaveColWidths, colOrder = [], onSaveColOrder, onClearLayout }) {
   // Cleanup previous render
   if (wrapEl._filterCleanup) wrapEl._filterCleanup();
 
@@ -13,6 +13,14 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
   }
 
   let cols = columns.length ? [...columns] : Object.keys(initRows[0]);
+
+  // Apply saved column order (keep any new cols not in saved order at the end)
+  const _origCols = [...cols];
+  if (colOrder.length) {
+    const saved = colOrder.filter(c => cols.includes(c));
+    const extra = cols.filter(c => !saved.includes(c));
+    cols = [...saved, ...extra];
+  }
 
   // ── Mutable row state (server-side filtering replaces these) ──────────────
   let rows        = initRows;
@@ -39,6 +47,17 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
   let _isSearchTyping   = false;
   let _filterTimer      = null;
   let _dropdownTimer    = null;
+  let _currentLabelMap  = {}; // updated each time _renderDropdown runs
+
+  // ── Row selection state ───────────────────────────────────────────────────
+  const selectedRows = new Set(); // Set of data-i strings (indices into _filteredCache)
+  let _dragSelecting = false;
+  let _dragSelectVal = true;
+
+  // ── Column drag-reorder state ─────────────────────────────────────────────
+  let _dragColSrc    = null;  // source index into cols
+  let _dragColDst    = null;  // insertion index
+  let _dragColActive = false; // mouse moved enough to be a real drag
 
   // ── Build filter param object from current active patterns + checkboxes ───
   function _buildCurrentFilters(excludeEnrichedCol = null) {
@@ -92,6 +111,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
         </svg>
       </button>
       <button class="tbl-clear-all" style="display:none" title="Clear all filters">✕ CLEAR ALL FILTERS</button>
+      <button class="tbl-clear-layout" style="display:none" title="Reset column order to default">↺ RESET LAYOUT</button>
     </div>
   `;
   container.appendChild(exportBar);
@@ -114,11 +134,48 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
   const headerTr = document.createElement('tr');
   thead.appendChild(headerTr);
 
+  // ── Selection helpers ─────────────────────────────────────────────────────
+  function _applyRowSelection(tr, selected) {
+    tr.classList.toggle('tbl-row-selected', selected);
+    const cb = tr.querySelector('.tbl-sel-cb');
+    if (cb) cb.checked = selected;
+  }
+
+  function _updateSelAllCheckbox() {
+    const selAll = headerTr.querySelector('.tbl-sel-all');
+    if (!selAll) return;
+    const total = _filteredCache.length;
+    selAll.checked = total > 0 && selectedRows.size >= total;
+    selAll.indeterminate = selectedRows.size > 0 && selectedRows.size < total;
+  }
+
+  function _updateClearLayoutBtn() {
+    const btn = exportBar.querySelector('.tbl-clear-layout');
+    if (!btn) return;
+    const isReordered = cols.length !== _origCols.length || cols.some((c, i) => c !== _origCols[i]);
+    btn.style.display = isReordered ? '' : 'none';
+  }
+
   // ── Rebuild column headers (called on init and after pin reorder) ─────────
   function _buildHeaders() {
     filterTr.innerHTML = '';
     headerTr.innerHTML = '';
     colgroup.innerHTML = '';
+
+    // Checkbox column
+    const selCol = document.createElement('col');
+    selCol.style.width = '32px';
+    colgroup.appendChild(selCol);
+
+    const selFilterTh = document.createElement('th');
+    selFilterTh.className = 'tbl-filter-th tbl-sel-th';
+    filterTr.appendChild(selFilterTh);
+
+    const selHeaderTh = document.createElement('th');
+    selHeaderTh.className = 'tbl-sel-th';
+    selHeaderTh.innerHTML = '<input type="checkbox" class="tbl-sel-all" title="Select / deselect all">';
+    headerTr.appendChild(selHeaderTh);
+
     cols.forEach(c => {
       const col = document.createElement('col');
       const saved = colWidths[c];
@@ -162,6 +219,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
 
     _bindHeaderEvents();
     _fixStickyTop();
+    _updateClearLayoutBtn();
   }
 
   function _bindHeaderEvents() {
@@ -245,10 +303,38 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
       });
     });
 
+    headerTr.querySelector('.tbl-sel-all')?.addEventListener('change', e => {
+      if (e.target.checked) {
+        for (let i = 0; i < _filteredCache.length; i++) selectedRows.add(String(i));
+      } else {
+        selectedRows.clear();
+      }
+      tbody.querySelectorAll('tr[data-i]').forEach(tr => {
+        _applyRowSelection(tr, selectedRows.has(tr.dataset.i));
+      });
+      _updateSelAllCheckbox();
+    });
+
     headerTr.querySelectorAll('.tbl-col-header').forEach(hth => {
       const col = hth.dataset.col;
+
+      hth.addEventListener('mousedown', e => {
+        if (e.button !== 0) return;
+        if (e.target.closest('.tbl-filter-btn')) return;
+        const idx = cols.indexOf(col);
+        if (idx === -1) return;
+        _dragColSrc    = idx;
+        _dragColDst    = idx;
+        _dragColActive = false;
+        _dragGhost.textContent = col;
+        document.body.style.userSelect = 'none';
+        document.addEventListener('mousemove', _onColMouseMove);
+        document.addEventListener('mouseup',   _onColMouseUp);
+      });
+
       hth.addEventListener('click', e => {
-        if (e.target.closest('.tbl-filter-btn')) return; // ▾ button has its own handler
+        if (_dragColActive) return; // was a drag, not a click
+        if (e.target.closest('.tbl-filter-btn')) return;
         e.stopPropagation();
         if (openDropdownCol === col) _closeDropdown();
         else {
@@ -275,6 +361,101 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
   const tbody = document.createElement('tbody');
   table.appendChild(tbody);
   container.appendChild(table);
+
+  // ── Row selection events (event delegation on tbody) ──────────────────────
+  tbody.addEventListener('mousedown', e => {
+    const cb = e.target.closest('.tbl-sel-cb');
+    if (!cb) return;
+    e.preventDefault(); // prevent text selection during drag
+    const tr = cb.closest('tr[data-i]');
+    if (!tr) return;
+    const idx = tr.dataset.i;
+    _dragSelectVal = !selectedRows.has(idx);
+    _dragSelecting = true;
+    if (_dragSelectVal) selectedRows.add(idx); else selectedRows.delete(idx);
+    _applyRowSelection(tr, _dragSelectVal);
+    _updateSelAllCheckbox();
+  });
+
+  tbody.addEventListener('mouseover', e => {
+    if (!_dragSelecting) return;
+    const tr = e.target.closest('tr[data-i]');
+    if (!tr) return;
+    const idx = tr.dataset.i;
+    if (_dragSelectVal) selectedRows.add(idx); else selectedRows.delete(idx);
+    _applyRowSelection(tr, _dragSelectVal);
+    _updateSelAllCheckbox();
+  });
+
+  // Prevent browser from toggling checkbox state after mousedown already handled it
+  tbody.addEventListener('click', e => {
+    if (e.target.closest('.tbl-sel-cb')) e.preventDefault();
+  });
+
+  const _onDocMouseUp = () => { _dragSelecting = false; };
+  document.addEventListener('mouseup', _onDocMouseUp);
+
+  // ── Column drag-reorder ghost + insertion line ────────────────────────────
+  const _dragGhost = document.createElement('div');
+  _dragGhost.className    = 'tbl-drag-ghost';
+  _dragGhost.style.display = 'none';
+  document.body.appendChild(_dragGhost);
+
+  const _dragLine = document.createElement('div');
+  _dragLine.className    = 'tbl-drag-line';
+  _dragLine.style.display = 'none';
+  document.body.appendChild(_dragLine);
+
+  const _onColMouseMove = (e) => {
+    _dragGhost.style.left = `${e.clientX + 14}px`;
+    _dragGhost.style.top  = `${e.clientY - 14}px`;
+    _dragGhost.style.display = '';
+
+    const ths = [...headerTr.querySelectorAll('.tbl-col-header')];
+    let dst = ths.length;
+    for (let i = 0; i < ths.length; i++) {
+      const r = ths[i].getBoundingClientRect();
+      if (e.clientX < r.left + r.width / 2) { dst = i; break; }
+    }
+    _dragColDst = dst;
+
+    const lineRect = dst < ths.length
+      ? ths[dst].getBoundingClientRect()
+      : ths[ths.length - 1].getBoundingClientRect();
+    const lineX = dst < ths.length ? lineRect.left : lineRect.right;
+    const hdrRect = thead.getBoundingClientRect();
+    _dragLine.style.left   = `${lineX - 1}px`;
+    _dragLine.style.top    = `${hdrRect.top}px`;
+    _dragLine.style.height = `${thead.offsetHeight}px`;
+    _dragLine.style.display = '';
+
+    _dragColActive = true;
+  };
+
+  const _onColMouseUp = () => {
+    document.removeEventListener('mousemove', _onColMouseMove);
+    document.removeEventListener('mouseup',   _onColMouseUp);
+    document.body.style.userSelect = '';
+    _dragGhost.style.display = 'none';
+    _dragLine.style.display  = 'none';
+
+    const src      = _dragColSrc;
+    const dst      = _dragColDst;
+    const wasActive = _dragColActive;
+    _dragColSrc = null;
+    _dragColDst = null;
+
+    // Reset _dragColActive after the pending click event fires
+    requestAnimationFrame(() => { _dragColActive = false; });
+
+    if (wasActive && dst !== null && dst !== src && dst !== src + 1) {
+      const [moved] = cols.splice(src, 1);
+      cols.splice(dst > src ? dst - 1 : dst, 0, moved);
+      _buildHeaders();
+      _renderRows();
+      if (onSaveColOrder) onSaveColOrder([...cols]);
+    }
+  };
 
   // ── Floating dropdown (appended to <body> to escape overflow clipping) ────
   const dropdown = document.createElement('div');
@@ -316,7 +497,10 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
 
   function _buildRowsHtml(batch, startIdx) {
     return batch.map((r, i) => {
-      let tr = `<tr data-i="${startIdx + i}">`;
+      const idx = String(startIdx + i);
+      const sel = selectedRows.has(idx);
+      let tr = `<tr data-i="${idx}"${sel ? ' class="tbl-row-selected"' : ''}>`;
+      tr += `<td class="tbl-sel-td"><input type="checkbox" class="tbl-sel-cb"${sel ? ' checked' : ''}></td>`;
       cols.forEach(c => {
         const v = _esc(String(r[c] ?? ''));
         tr += `<td title="${v}">${v}</td>`;
@@ -338,7 +522,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
     if (_renderedCount < toRender) {
       const sentinel = document.createElement('tr');
       sentinel.className = 'tbl-sentinel';
-      sentinel.innerHTML = `<td colspan="${cols.length}" style="padding:6px;text-align:center;color:var(--text-dim);font-size:11px">${_renderedCount.toLocaleString()} / ${toRender.toLocaleString()} rows loaded</td>`;
+      sentinel.innerHTML = `<td colspan="${cols.length + 1}" style="padding:6px;text-align:center;color:var(--text-dim);font-size:11px">${_renderedCount.toLocaleString()} / ${toRender.toLocaleString()} rows loaded</td>`;
       tbody.appendChild(sentinel);
       _batchObserver = new IntersectionObserver(entries => {
         if (entries[0].isIntersecting) _appendBatch();
@@ -346,25 +530,26 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
       _batchObserver.observe(sentinel);
     } else if (_filteredCache.length > PREVIEW_LIMIT) {
       tbody.insertAdjacentHTML('beforeend',
-        `<tr><td colspan="${cols.length}" style="text-align:center;color:var(--text-dim);padding:10px">… ${(_filteredCache.length - PREVIEW_LIMIT).toLocaleString()} more rows (${_filteredCache.length.toLocaleString()} total filtered)</td></tr>`
+        `<tr><td colspan="${cols.length + 1}" style="text-align:center;color:var(--text-dim);padding:10px">… ${(_filteredCache.length - PREVIEW_LIMIT).toLocaleString()} more rows (${_filteredCache.length.toLocaleString()} total filtered)</td></tr>`
       );
     }
   }
 
   function _renderRows() {
     _disposeBatchObserver();
+    selectedRows.clear();
     _filteredCache = _getFilteredRows();
     _renderedCount = 0;
 
     if (!_filteredCache.length) {
-      tbody.innerHTML = `<tr><td colspan="${cols.length}" style="text-align:center;color:var(--text-dim);padding:16px">No rows match current filters</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="${cols.length + 1}" style="text-align:center;color:var(--text-dim);padding:16px">No rows match current filters</td></tr>`;
     } else {
       tbody.innerHTML = _buildRowsHtml(_filteredCache.slice(0, RENDER_BATCH), 0);
       _renderedCount = Math.min(RENDER_BATCH, Math.min(_filteredCache.length, PREVIEW_LIMIT));
       if (_renderedCount < Math.min(_filteredCache.length, PREVIEW_LIMIT)) {
         const sentinel = document.createElement('tr');
         sentinel.className = 'tbl-sentinel';
-        sentinel.innerHTML = `<td colspan="${cols.length}" style="padding:6px;text-align:center;color:var(--text-dim);font-size:11px">${_renderedCount.toLocaleString()} / ${Math.min(_filteredCache.length, PREVIEW_LIMIT).toLocaleString()} rows loaded</td>`;
+        sentinel.innerHTML = `<td colspan="${cols.length + 1}" style="padding:6px;text-align:center;color:var(--text-dim);font-size:11px">${_renderedCount.toLocaleString()} / ${Math.min(_filteredCache.length, PREVIEW_LIMIT).toLocaleString()} rows loaded</td>`;
         tbody.appendChild(sentinel);
         _batchObserver = new IntersectionObserver(entries => {
           if (entries[0].isIntersecting) _appendBatch();
@@ -372,7 +557,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
         _batchObserver.observe(sentinel);
       } else if (_filteredCache.length > PREVIEW_LIMIT) {
         tbody.insertAdjacentHTML('beforeend',
-          `<tr><td colspan="${cols.length}" style="text-align:center;color:var(--text-dim);padding:10px">… ${(_filteredCache.length - PREVIEW_LIMIT).toLocaleString()} more rows (${_filteredCache.length.toLocaleString()} total filtered)</td></tr>`
+          `<tr><td colspan="${cols.length + 1}" style="text-align:center;color:var(--text-dim);padding:10px">… ${(_filteredCache.length - PREVIEW_LIMIT).toLocaleString()} more rows (${_filteredCache.length.toLocaleString()} total filtered)</td></tr>`
         );
       }
     }
@@ -389,6 +574,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
       headerTr.querySelector(`th[data-col="${c}"]`)?.classList.toggle('filter-active', isActive);
       filterTr.querySelector(`th[data-col="${c}"]`)?.classList.toggle('filter-active', isActive);
     });
+    _updateSelAllCheckbox();
   }
 
   // ── Dropdown ──────────────────────────────────────────────────────────────
@@ -440,6 +626,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
     } else {
       allVals = uniqueVals.get(col) ?? [];
     }
+    _currentLabelMap = labelMap;
 
     const selected = onFilter ? (activeCheckboxes.get(col) || new Set()) : (activeFilters.get(col) || new Set());
 
@@ -506,21 +693,6 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
     });
 
     // Enter: apply selected options to rows.
-    searchInput.addEventListener('keydown', e => {
-      if (e.key !== 'Enter') return;
-      clearTimeout(_filterTimer);
-      const filterInputEl = filterTr.querySelector(`.tbl-filter-input[data-col="${col}"]`);
-      if (onFilter) {
-        const sel = activeCheckboxes.get(col);
-        if (filterInputEl) filterInputEl.value = sel?.size ? [...sel].map(v => labelMap[v] || v).join(' | ') : '';
-        _fetchFiltered();
-      } else {
-        const sel = activeFilters.get(col);
-        if (filterInputEl) filterInputEl.value = sel?.size ? [...sel].map(v => labelMap[v] || v).join(' | ') : '';
-        _renderRows();
-        _closeDropdown();
-      }
-    });
 
     dropdown.querySelector('.tfd-check-all').addEventListener('change', e => {
       const text = dropdown.querySelector('.tfd-search').value;
@@ -595,6 +767,24 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
     openDropdownCol = null;
   }
 
+  // ── Apply dropdown selection & close ─────────────────────────────────────
+  function _applyDropdown() {
+    const col = openDropdownCol;
+    if (!col) return;
+    clearTimeout(_filterTimer);
+    _closeDropdown();
+    const filterInputEl = filterTr.querySelector(`.tbl-filter-input[data-col="${col}"]`);
+    if (onFilter) {
+      const sel = activeCheckboxes.get(col);
+      if (filterInputEl) filterInputEl.value = sel?.size ? [...sel].map(v => _currentLabelMap[v] || v).join(' | ') : '';
+      _fetchFiltered();
+    } else {
+      const sel = activeFilters.get(col);
+      if (filterInputEl) filterInputEl.value = sel?.size ? [...sel].map(v => _currentLabelMap[v] || v).join(' | ') : '';
+      _renderRows();
+    }
+  }
+
   // ── Event bindings ────────────────────────────────────────────────────────
 
   // Pin column input
@@ -639,6 +829,14 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
     }
   });
 
+  // Reset column layout
+  exportBar.querySelector('.tbl-clear-layout').addEventListener('click', () => {
+    cols.splice(0, cols.length, ..._origCols);
+    _buildHeaders();
+    _renderRows();
+    if (onClearLayout) onClearLayout();
+  });
+
   // Clear all filters
   clearAllBtn.addEventListener('click', () => {
     activeFilters.clear();
@@ -654,6 +852,14 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
     if (!dropdown.contains(e.target) && !table.contains(e.target)) _closeDropdown();
   };
   document.addEventListener('click', _onDocClick);
+
+  // Close + apply dropdown on Enter regardless of where focus is
+  const _onDocKeydown = e => {
+    if (e.key !== 'Enter' || !openDropdownCol) return;
+    if (e.target.classList.contains('tbl-filter-input')) return; // has its own handler
+    _applyDropdown();
+  };
+  document.addEventListener('keydown', _onDocKeydown);
 
   // ── Scroll position indicator ─────────────────────────────────────────
   const scrollIndicator = document.createElement('div');
@@ -696,6 +902,10 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
   // ── Cleanup ───────────────────────────────────────────────────────────────
   wrapEl._filterCleanup = () => {
     document.removeEventListener('click', _onDocClick);
+    document.removeEventListener('keydown', _onDocKeydown);
+    document.removeEventListener('mouseup', _onDocMouseUp);
+    document.removeEventListener('mousemove', _onColMouseMove);
+    document.removeEventListener('mouseup', _onColMouseUp);
     wrapEl.removeEventListener('scroll', _onWrapScroll);
     _disposeBatchObserver();
     clearTimeout(_hideScrollTimer);
@@ -703,6 +913,8 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
     if (stickyFrame) cancelAnimationFrame(stickyFrame);
     dropdown.remove();
     scrollIndicator.remove();
+    _dragGhost.remove();
+    _dragLine.remove();
     delete wrapEl._filterCleanup;
   };
 
@@ -716,7 +928,8 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
     requestAnimationFrame(() => requestAnimationFrame(() => {
       const widths = {};
       headerTr.querySelectorAll('th').forEach((th, i) => {
-        if (cols[i]) widths[cols[i]] = th.offsetWidth;
+        if (i === 0) return; // skip checkbox column
+        if (cols[i - 1]) widths[cols[i - 1]] = th.offsetWidth;
       });
       onSaveColWidths(widths);
     }));
