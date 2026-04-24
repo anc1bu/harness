@@ -662,6 +662,7 @@ def init_db():
             col_order  TEXT,
             PRIMARY KEY (user_id, table_name)
         )''',
+        'ALTER TABLE user_table_prefs ADD COLUMN col_widths TEXT',
     ]:
         try:
             conn.execute(sql)
@@ -1614,9 +1615,37 @@ def _setup_enrichment(conn, orig_table, custname, system, raw_cols, skip_text_co
     col_lookup = {}
     col_hints  = {}
 
+    # ── TMC1T-based KOTABNR enrichment ──────────────────────────────────────
+    # When a table has both KOTABNR and KVEWE, the standard DD08L path leads
+    # to T681T (which also requires SETYP). TMC1T.GSTRU = KVEWE || KOTABNR
+    # gives descriptions without needing SETYP — takes priority here.
+    _dynamic_skip = set(skip_text_cols)
+    if 'KOTABNR' in raw_cols and 'KVEWE' in raw_cols:
+        tmc1t_db = f'{custname}_{system}_TMC1T'
+        tmc1t_exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (tmc1t_db,)
+        ).fetchone()
+        if tmc1t_exists:
+            tmc1t_preload = {}
+            for r in conn.execute(
+                f'SELECT GSTRU, GSTXT FROM "{tmc1t_db}" WHERE SPRAS=?', ('EN',)
+            ).fetchall():
+                gstxt = (r['GSTXT'] or '').strip()
+                if gstxt:
+                    tmc1t_preload[(r['GSTRU'] or '').strip()] = gstxt
+            col_lookup['KOTABNR'] = {
+                'source':    'tmc1t',
+                '_preload':  tmc1t_preload,
+                '_kvewe_col': 'KVEWE',
+            }
+        else:
+            col_hints['KOTABNR'] = ['Upload TMC1T to see KOTABNR descriptions']
+        _dynamic_skip.add('KOTABNR')
+
     if dd08l_missing:
         for col in raw_cols:
-            col_hints[col] = ["Upload DD08L with FRKART='TEXT' to see cell descriptions"]
+            if col not in _dynamic_skip:
+                col_hints[col] = ["Upload DD08L with FRKART='TEXT' to see cell descriptions"]
     elif dd08l_exists_check and dd03l_exists:
         checktable_for_col = {
             col: src_dd03l[col]['checktable']
@@ -1702,8 +1731,8 @@ def _setup_enrichment(conn, orig_table, custname, system, raw_cols, skip_text_co
                     text_field_map[r['TABNAME']] = r['FIELDNAME']
 
         for col in raw_cols:
-            if col in skip_text_cols:
-                continue  # Caller handles this column separately; skip preload
+            if col in _dynamic_skip:
+                continue
             checktable = checktable_for_col.get(col)
             if not checktable:
                 continue
@@ -1764,7 +1793,7 @@ def _setup_enrichment(conn, orig_table, custname, system, raw_cols, skip_text_co
 
     if dd03l_exists:
         for col in raw_cols:
-            if col in col_lookup or col in col_hints or col in skip_text_cols:
+            if col in col_lookup or col in col_hints or col in _dynamic_skip:
                 continue
             info = src_dd03l.get(col)
             if not info or not info['domname']:
@@ -1786,6 +1815,9 @@ def _setup_enrichment(conn, orig_table, custname, system, raw_cols, skip_text_co
             ).fetchall()
             cfg['_preload'] = {r['DOMVALUE_L']: (r['DDTEXT'] or '').strip() for r in rows_dd07t}
             continue
+
+        if cfg.get('source') == 'tmc1t':
+            continue  # already preloaded above
 
         text_key_field = cfg.get('text_key_field', col)
         text_db_cols = {r[1] for r in conn.execute(f'PRAGMA table_info("{cfg["text_db"]}")')}
@@ -1810,9 +1842,10 @@ def _setup_enrichment(conn, orig_table, custname, system, raw_cols, skip_text_co
         cfg['_preload'] = preload
         cfg['_available_kfs'] = available_kfs
 
-    plain_pairs   = []
-    dd07t_triples = []
-    text_triples  = []
+    plain_pairs    = []
+    dd07t_triples  = []
+    text_triples   = []
+    tmc1t_triples  = []
     for raw_col, enriched_col in zip(raw_cols, enriched_cols):
         cfg = col_lookup.get(raw_col)
         if cfg is None:
@@ -1820,6 +1853,11 @@ def _setup_enrichment(conn, orig_table, custname, system, raw_cols, skip_text_co
         elif cfg.get('source') == 'dd07t':
             if cfg.get('_preload'):  # empty preload → no domain values → treat as plain
                 dd07t_triples.append((raw_col, enriched_col, cfg))
+            else:
+                plain_pairs.append((raw_col, enriched_col))
+        elif cfg.get('source') == 'tmc1t':
+            if cfg.get('_preload'):
+                tmc1t_triples.append((raw_col, enriched_col, cfg))
             else:
                 plain_pairs.append((raw_col, enriched_col))
         else:
@@ -1831,6 +1869,7 @@ def _setup_enrichment(conn, orig_table, custname, system, raw_cols, skip_text_co
         'col_hints':            col_hints,
         'plain_pairs':          plain_pairs,
         'dd07t_triples':        dd07t_triples,
+        'tmc1t_triples':        tmc1t_triples,
         'text_triples':         text_triples,
         'dd04t_missing':        dd04t_missing,
         'dd08l_missing':        dd08l_missing,
@@ -1840,7 +1879,7 @@ def _setup_enrichment(conn, orig_table, custname, system, raw_cols, skip_text_co
     }
 
 
-def _enrich_row(row_d, plain_pairs, dd07t_triples, text_triples):
+def _enrich_row(row_d, plain_pairs, dd07t_triples, text_triples, tmc1t_triples=()):
     """Apply enrichment to a single row dict. Returns (enriched_row, dd07t_miss_set)."""
     enriched_row = {ec: row_d.get(rc) for rc, ec in plain_pairs}
     dd07t_miss = set()
@@ -1868,10 +1907,20 @@ def _enrich_row(row_d, plain_pairs, dd07t_triples, text_triples):
                 desc = cfg['_preload'].get(key_vals) or None
         enriched_row[ec] = f'{val} - {desc}' if (desc and val is not None and str(val).strip() != '') else val
 
+    for rc, ec, cfg in tmc1t_triples:
+        val       = row_d.get(rc)
+        kvewe_val = row_d.get(cfg['_kvewe_col'])
+        desc      = None
+        if val is not None and kvewe_val is not None:
+            key = str(kvewe_val).strip() + str(val).strip()
+            if key:
+                desc = cfg['_preload'].get(key)
+        enriched_row[ec] = f'{val} - {desc}' if (desc and val is not None and str(val).strip()) else val
+
     return enriched_row, dd07t_miss
 
 
-def _enrich_rows_batch(raw_rows, plain_pairs, dd07t_triples, text_triples):
+def _enrich_rows_batch(raw_rows, plain_pairs, dd07t_triples, text_triples, tmc1t_triples=()):
     """Vectorized batch enrichment — column-major order avoids 5000 function calls
     and keeps preload/cfg lookups out of the inner loop. Returns (rows_out, dd07t_miss_all)."""
     n = len(raw_rows)
@@ -1910,6 +1959,19 @@ def _enrich_rows_batch(raw_rows, plain_pairs, dd07t_triples, text_triples):
                 rows_out[i][ec] = f'{val} - {desc}' if desc else val
             else:
                 rows_out[i][ec] = val
+
+    for rc, ec, cfg in tmc1t_triples:
+        preload   = cfg['_preload']
+        kvewe_col = cfg['_kvewe_col']
+        for i, row in enumerate(raw_rows):
+            val       = row[rc]
+            kvewe_val = row[kvewe_col]
+            desc      = None
+            if val is not None and kvewe_val is not None:
+                key = str(kvewe_val).strip() + str(val).strip()
+                if key:
+                    desc = preload.get(key)
+            rows_out[i][ec] = f'{val} - {desc}' if desc else val
 
     return rows_out, dd07t_miss_all
 
@@ -2021,7 +2083,8 @@ def get_table_data(table):
             _log_val_fields(conn, custname, 'V-Show-2', orig_table, enr['all_missing'])
 
         rows_out, dd07t_miss_all = _enrich_rows_batch(
-            raw_rows, enr['plain_pairs'], enr['dd07t_triples'], enr['text_triples']
+            raw_rows, enr['plain_pairs'], enr['dd07t_triples'], enr['text_triples'],
+            enr.get('tmc1t_triples', [])
         )
 
         if orig_table.upper() == 'T683S':
@@ -2074,24 +2137,34 @@ def get_table_layout(table):
     user_id = _session_user_id()
     with get_db() as conn:
         row = conn.execute(
-            'SELECT col_order FROM user_table_prefs WHERE user_id=? AND table_name=?',
+            'SELECT col_order, col_widths FROM user_table_prefs WHERE user_id=? AND table_name=?',
             (user_id, table)
         ).fetchone()
-    return jsonify({'col_order': json.loads(row['col_order']) if row and row['col_order'] else []})
+    return jsonify({
+        'col_order':  json.loads(row['col_order'])  if row and row['col_order']  else [],
+        'col_widths': json.loads(row['col_widths']) if row and row['col_widths'] else {},
+    })
 
 
 @app.patch('/api/tables/<table>/layout')
 @require_auth
 def save_table_layout(table):
     user_id = _session_user_id()
-    data = request.get_json(silent=True) or {}
-    col_order = data.get('col_order', [])
-    if not isinstance(col_order, list):
-        return jsonify({'error': 'Invalid payload'}), 400
+    data      = request.get_json(silent=True) or {}
+    col_order  = data.get('col_order')
+    col_widths = data.get('col_widths')
+    if col_order  is not None and not isinstance(col_order,  list): return jsonify({'error': 'Invalid col_order'}),  400
+    if col_widths is not None and not isinstance(col_widths, dict): return jsonify({'error': 'Invalid col_widths'}), 400
     with get_db() as conn:
         conn.execute(
-            'INSERT OR REPLACE INTO user_table_prefs (user_id, table_name, col_order) VALUES (?,?,?)',
-            (user_id, table, json.dumps(col_order))
+            '''INSERT INTO user_table_prefs (user_id, table_name, col_order, col_widths)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(user_id, table_name) DO UPDATE SET
+                   col_order  = COALESCE(excluded.col_order,  user_table_prefs.col_order),
+                   col_widths = COALESCE(excluded.col_widths, user_table_prefs.col_widths)''',
+            (user_id, table,
+             json.dumps(col_order)  if col_order  is not None else None,
+             json.dumps(col_widths) if col_widths is not None else None)
         )
     return jsonify({'ok': True})
 
@@ -2146,9 +2219,10 @@ def export_table(table):
         yield buf.getvalue()
         buf.seek(0); buf.truncate(0)
 
-        plain_pairs   = enr['plain_pairs']
-        dd07t_triples = enr['dd07t_triples']
-        text_triples  = enr['text_triples']
+        plain_pairs    = enr['plain_pairs']
+        dd07t_triples  = enr['dd07t_triples']
+        text_triples   = enr['text_triples']
+        tmc1t_triples  = enr.get('tmc1t_triples', [])
 
         with get_db() as conn2:
             batch_size = 1000
@@ -2160,7 +2234,7 @@ def export_table(table):
                 if not rows:
                     break
                 for row in rows:
-                    er, _ = _enrich_row(dict(row), plain_pairs, dd07t_triples, text_triples)
+                    er, _ = _enrich_row(dict(row), plain_pairs, dd07t_triples, text_triples, tmc1t_triples)
                     writer.writerow(er.values())
                 yield buf.getvalue()
                 buf.seek(0); buf.truncate(0)

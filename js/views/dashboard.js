@@ -29,6 +29,9 @@ function _classifyTable(name) {
 export function mount(container) {
   container.innerHTML = _html();
 
+  container._selectedTables   = new Map(); // key=table, value={table,origTable,description}
+  container._partitionCleanups = [];
+
   _startClock(container);
   _loadTablesMeta(container);
   _initUpload(container);
@@ -65,6 +68,7 @@ function _tableSection(id, label, tbodyId, section, extraContent = '') {
         <table class="meta-table">
           <thead>
             <tr>
+              <th class="mt-sel-th"></th>
               <th>Table</th>
               <th>Description</th>
               <th>Date</th>
@@ -73,7 +77,7 @@ function _tableSection(id, label, tbodyId, section, extraContent = '') {
             </tr>
           </thead>
           <tbody id="${tbodyId}">
-            <tr><td colspan="5" class="meta-empty">No tables uploaded</td></tr>
+            <tr><td colspan="6" class="meta-empty">No tables uploaded</td></tr>
           </tbody>
         </table>
         ${extraContent}
@@ -173,6 +177,14 @@ async function _loadTablesMeta(container) {
     _applySectionStates(container, sectionStates);
     _initSectionToggles(container);
     _autoFitControlPanel();
+
+    // Remove stale selections (deleted tables) and refresh data panel
+    const existingTables = new Set(tables.map(t => t.table));
+    let changed = false;
+    for (const key of container._selectedTables.keys()) {
+      if (!existingTables.has(key)) { container._selectedTables.delete(key); changed = true; }
+    }
+    if (changed) _renderSelectedTables(container);
   } catch (err) {
     toast(`Failed to load tables: ${err.message}`, 'err');
   }
@@ -273,9 +285,9 @@ function _renderSubPanelSections(container, subPanels) {
       </div>
       <div class="section-body">
         <table class="meta-table">
-          <thead><tr><th>Table</th><th>Description</th><th>Date</th><th>Entry</th><th>Action</th></tr></thead>
+          <thead><tr><th class="mt-sel-th"></th><th>Table</th><th>Description</th><th>Date</th><th>Entry</th><th>Action</th></tr></thead>
           <tbody id="sp-tbody-${sp.id}">
-            <tr><td colspan="5" class="meta-empty">No tables</td></tr>
+            <tr><td colspan="6" class="meta-empty">No tables</td></tr>
           </tbody>
         </table>
       </div>
@@ -326,9 +338,10 @@ function _renderTablesMeta(container, tables, assignments = {}, subPanels = []) 
   }
 }
 
-function _rowHtml(t, draggable = false) {
+function _rowHtml(t, draggable = false, selected = false) {
   return `
-    <tr class="mt-row${draggable ? ' mt-draggable' : ''}" data-table="${t.table}" data-orig-table="${t.orig_table}" data-description="${t.description || ''}" style="cursor:pointer;" ${draggable ? 'draggable="true"' : ''}>
+    <tr class="mt-row${draggable ? ' mt-draggable' : ''}${selected ? ' mt-row-checked' : ''}" data-table="${t.table}" data-orig-table="${t.orig_table}" data-description="${_esc(t.description || '')}" style="cursor:pointer;" ${draggable ? 'draggable="true"' : ''}>
+      <td class="mt-sel-td"><input type="checkbox" class="mt-select-cb"${selected ? ' checked' : ''}></td>
       <td class="mt-name">${draggable ? '<span class="mt-drag-handle" title="Drag to move">⠿</span> ' : ''}${t.orig_table}</td>
       <td class="mt-desc-td"><span class="mt-desc">${t.description || ''}</span></td>
       <td>${t.date}</td>
@@ -345,18 +358,64 @@ function _bindTbody(tbody, container) {
       _deleteTable(container, btn.dataset.table);
     });
   });
+
+  tbody.querySelectorAll('.mt-select-cb').forEach(cb => {
+    cb.addEventListener('change', (e) => {
+      e.stopPropagation();
+      const row = cb.closest('.mt-row');
+      if (!row) return;
+      const sel = container._selectedTables;
+      if (e.target.checked) {
+        if (sel.size >= 4) {
+          e.target.checked = false;
+          toast('Max 4 tables can be shown at once', 'warn');
+          return;
+        }
+        sel.set(row.dataset.table, {
+          table:       row.dataset.table,
+          origTable:   row.dataset.origTable,
+          description: row.dataset.description || '',
+        });
+        row.classList.add('mt-row-checked');
+      } else {
+        sel.delete(row.dataset.table);
+        row.classList.remove('mt-row-checked');
+      }
+      _renderSelectedTables(container);
+    });
+  });
+
   tbody.querySelectorAll('.mt-row').forEach(row => {
-    row.addEventListener('click', () => {
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('.mt-select-cb') || e.target.closest('.mt-del')) return;
       if (container._tableLoading) return;
-      _loadTableData(container, row.dataset.table, row.dataset.origTable, row.dataset.description);
+
+      const sel = container._selectedTables;
+      sel.clear();
+      sel.set(row.dataset.table, {
+        table:       row.dataset.table,
+        origTable:   row.dataset.origTable,
+        description: row.dataset.description || '',
+      });
+
+      // Update all checkboxes across all panels
+      container.querySelectorAll('.mt-select-cb').forEach(cb => {
+        const r = cb.closest('.mt-row');
+        const mine = r?.dataset.table === row.dataset.table;
+        cb.checked = mine;
+        r?.classList.toggle('mt-row-checked', mine);
+      });
+
+      _renderSelectedTables(container);
     });
   });
 }
 
 function _fillDraggableTbody(tbody, tables, panel, emptyMsg, container, subPanels = []) {
+  const sel = container._selectedTables || new Map();
   tbody.innerHTML = tables.length
-    ? tables.map(t => _rowHtml(t, true)).join('')
-    : `<tr><td colspan="5" class="meta-empty">${emptyMsg}</td></tr>`;
+    ? tables.map(t => _rowHtml(t, true, sel.has(t.table))).join('')
+    : `<tr><td colspan="6" class="meta-empty">${emptyMsg}</td></tr>`;
   _bindTbody(tbody, container);
   _bindDragDrop(tbody, panel, container, subPanels);
 }
@@ -414,12 +473,14 @@ function _bindDragDrop(tbody, panel, container, subPanels = []) {
 const _EXPECTED_BASIS = ['DD03L', 'DD04T', 'DD07T', 'DD02T', 'DD08L'];
 
 function _fillBasisTbody(tbody, tables, container) {
+  const sel = container._selectedTables || new Map();
   const uploaded = new Set(tables.map(t => t.orig_table.toUpperCase()));
-  let html = tables.map(t => _rowHtml(t)).join('');
+  let html = tables.map(t => _rowHtml(t, false, sel.has(t.table))).join('');
   for (const name of _EXPECTED_BASIS) {
     if (!uploaded.has(name)) {
       html += `
         <tr>
+          <td class="mt-sel-td"></td>
           <td class="mt-name" style="color:var(--text-dim)">${name}</td>
           <td style="color:var(--text-dim)">—</td>
           <td style="color:var(--text-dim)">—</td>
@@ -633,6 +694,7 @@ function _injectPendingRow(container, tableName, system, client, date) {
   const tr = document.createElement('tr');
   tr.dataset.pending = tableName;
   tr.innerHTML = `
+    <td class="mt-sel-td"></td>
     <td class="mt-name">${tableName}</td>
     <td>${system}</td>
     <td>${client}</td>
@@ -653,6 +715,180 @@ function _injectPendingRow(container, tableName, system, client, date) {
     entry: tr.querySelector('.mt-entry'),
     row:   tr,
   };
+}
+
+// ── Selection rendering ────────────────────────────────────────────────────
+
+function _clearPartitionCleanups(container) {
+  const wrapEl = container.querySelector('#table-wrap');
+  if (wrapEl) {
+    wrapEl.classList.remove('tbl-partitioned');
+    if (wrapEl._filterCleanup) {
+      try { wrapEl._filterCleanup(); } catch {}
+    }
+  }
+  if (container._partitionCleanups?.length) {
+    for (const cleanup of container._partitionCleanups) {
+      try { cleanup(); } catch {}
+    }
+    container._partitionCleanups = [];
+  }
+}
+
+function _renderSelectedTables(container) {
+  const sel = container._selectedTables;
+
+  if (sel.size === 0) {
+    _clearPartitionCleanups(container);
+    const emptyEl   = container.querySelector('#table-empty');
+    const wrapEl    = container.querySelector('#table-wrap');
+    const nameLabel = container.querySelector('#table-name-label');
+    const descLabel = container.querySelector('#table-desc-label');
+    if (emptyEl) emptyEl.style.display = '';
+    if (wrapEl)  { wrapEl.style.display = 'none'; wrapEl.innerHTML = ''; }
+    if (nameLabel) nameLabel.textContent = '';
+    if (descLabel) descLabel.textContent = '';
+    return;
+  }
+
+  const tables = [...sel.values()];
+
+  if (tables.length === 1) {
+    _clearPartitionCleanups(container);
+    const t = tables[0];
+    _loadTableData(container, t.table, t.origTable, t.description);
+  } else {
+    _renderPartitioned(container, tables);
+  }
+}
+
+function _renderPartitioned(container, tables) {
+  _clearPartitionCleanups(container);
+
+  const emptyEl   = container.querySelector('#table-empty');
+  const wrapEl    = container.querySelector('#table-wrap');
+  const nameLabel = container.querySelector('#table-name-label');
+  const descLabel = container.querySelector('#table-desc-label');
+
+  if (emptyEl) emptyEl.style.display = 'none';
+  if (wrapEl)  { wrapEl.style.display = ''; wrapEl.innerHTML = ''; }
+  wrapEl.classList.add('tbl-partitioned');
+
+  if (nameLabel) nameLabel.textContent = `${tables.length} tables`;
+  if (descLabel) descLabel.textContent = '';
+
+  container._partitionCleanups = [];
+
+  for (const t of tables) {
+    const partition = document.createElement('div');
+    partition.className = 'tbl-partition';
+
+    const hdr = document.createElement('div');
+    hdr.className = 'tbl-partition-hdr';
+    hdr.innerHTML = `<span>${_esc(t.origTable)}</span>`
+                  + (t.description ? `<span class="tbl-ph-desc">${_esc(t.description)}</span>` : '');
+
+    const body = document.createElement('div');
+    body.className = 'tbl-partition-body';
+
+    partition.appendChild(hdr);
+    partition.appendChild(body);
+    wrapEl.appendChild(partition);
+
+    _loadTableDataInto(container, t.table, t.origTable, t.description, body);
+  }
+}
+
+async function _loadTableDataInto(container, table, origTable, description, wrapEl) {
+  wrapEl.innerHTML = '<div class="tbl-loading"><div class="tbl-spinner"></div><span>Loading…</span></div>';
+
+  const _fetchData = (filters = {}) => {
+    const params = new URLSearchParams({ offset: 0, limit: 10000 });
+    for (const [col, pat] of Object.entries(filters)) {
+      if (pat) params.set(`f.${col}`, pat);
+    }
+    return api.get(`/api/tables/${encodeURIComponent(table)}/data?${params}`);
+  };
+
+  try {
+    const data = await _fetchData();
+
+    if (data.dd04t_missing) {
+      wrapEl.innerHTML = '<div class="empty-state" style="height:100%"><div class="es-icon" style="font-size:24px">!</div><div>DD04T required</div></div>';
+      toast('pls upload DD04T table with English language', 'err');
+      return;
+    }
+    if (data.partial_descriptions) {
+      const fields   = (data.missing_fields || []).slice(0, 5);
+      const more     = (data.missing_fields || []).length > 5 ? ` (+${data.missing_fields.length - 5} more)` : '';
+      const fieldList = fields.length ? `\nMissing: ${fields.join(', ')}${more}` : '';
+      toast(`Some header descriptions missing for ${origTable}${fieldList}`, 'warn');
+    }
+
+    if (!data.rows || !data.rows.length) {
+      wrapEl.innerHTML = '<div class="empty-state" style="height:100%"><div class="es-icon" style="font-size:24px">▤</div><div>No data</div></div>';
+      return;
+    }
+
+    const onExport = () => {
+      const token = localStorage.getItem('token') || '';
+      const url = `/api/tables/${encodeURIComponent(table)}/export?token=${encodeURIComponent(token)}`;
+      const a = document.createElement('a');
+      a.href = url; a.download = `${origTable || table}.csv`; a.style.display = 'none';
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    };
+    const allLoaded = data.total <= data.rows.length;
+    const onFilter  = allLoaded ? undefined : (filters) => _fetchData(filters);
+    const onDistinct = allLoaded ? undefined : async (rawCol, currentFilters) => {
+      const params = new URLSearchParams({ col: rawCol });
+      for (const [col, pat] of Object.entries(currentFilters)) {
+        if (pat) params.set(`f.${col}`, pat);
+      }
+      const res = await api.get(`/api/tables/${encodeURIComponent(table)}/distinct?${params}`);
+      return { values: res.values || [], labels: res.labels || {} };
+    };
+    const layoutData = await api.get(`/api/tables/${encodeURIComponent(table)}/layout`).catch(() => ({}));
+    const onSaveColWidths = (widths) => {
+      api.patch(`/api/tables/${encodeURIComponent(table)}/layout`, { col_widths: widths }).catch(() => {});
+    };
+    const onSaveColOrder = (order) => {
+      api.patch(`/api/tables/${encodeURIComponent(table)}/layout`, { col_order: order }).catch(() => {});
+    };
+    const onClearLayout = () => {
+      api['delete'](`/api/tables/${encodeURIComponent(table)}/layout`).catch(() => {});
+    };
+
+    renderTable(wrapEl, {
+      rows: data.rows,
+      columns: data.columns,
+      rawColumns: data.raw_columns || [],
+      colTextTables: data.col_text_tables || {},
+      total: data.total,
+      onExport,
+      onFilter,
+      onDistinct,
+      colWidths: { ...(data.col_widths || {}), ...(layoutData.col_widths || {}) },
+      onSaveColWidths,
+      colOrder: layoutData.col_order || [],
+      onSaveColOrder,
+      onClearLayout,
+    });
+
+    if (wrapEl._filterCleanup) {
+      const cleanup = wrapEl._filterCleanup;
+      container._partitionCleanups.push(() => { try { cleanup(); } catch {} });
+    }
+
+    if (onDistinct && data.raw_columns?.length) {
+      setTimeout(async () => {
+        for (const rawCol of data.raw_columns) {
+          try { await onDistinct(rawCol, {}); } catch {}
+        }
+      }, 800);
+    }
+  } catch (err) {
+    wrapEl.innerHTML = `<div class="empty-state" style="height:100%"><div class="es-icon" style="font-size:24px">✕</div><div>${_esc(err.message)}</div></div>`;
+  }
 }
 
 // ── Table data ─────────────────────────────────────────────────────────────
@@ -726,10 +962,10 @@ async function _loadTableData(container, table, origTable, description = '') {
       const res = await api.get(`/api/tables/${encodeURIComponent(table)}/distinct?${params}`);
       return { values: res.values || [], labels: res.labels || {} };
     };
-    const onSaveColWidths = (widths) => {
-      api.patch(`/api/tables/${encodeURIComponent(table)}/col-widths`, widths).catch(() => {});
-    };
     const layoutData = await api.get(`/api/tables/${encodeURIComponent(table)}/layout`).catch(() => ({}));
+    const onSaveColWidths = (widths) => {
+      api.patch(`/api/tables/${encodeURIComponent(table)}/layout`, { col_widths: widths }).catch(() => {});
+    };
     const onSaveColOrder = (order) => {
       api.patch(`/api/tables/${encodeURIComponent(table)}/layout`, { col_order: order }).catch(() => {});
     };
@@ -745,7 +981,7 @@ async function _loadTableData(container, table, origTable, description = '') {
       onExport,
       onFilter,
       onDistinct,
-      colWidths: data.col_widths || {},
+      colWidths: { ...(data.col_widths || {}), ...(layoutData.col_widths || {}) },
       onSaveColWidths,
       colOrder: layoutData.col_order || [],
       onSaveColOrder,

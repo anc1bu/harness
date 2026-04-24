@@ -59,6 +59,12 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
   let _dragColDst    = null;  // insertion index
   let _dragColActive = false; // mouse moved enough to be a real drag
 
+  // ── Column resize state ───────────────────────────────────────────────────
+  let _resizeCol     = null;  // <col> element being resized
+  let _resizeStartX  = 0;
+  let _resizeStartW  = 0;
+  let _resizeActive  = false;
+
   // ── Build filter param object from current active patterns + checkboxes ───
   function _buildCurrentFilters(excludeEnrichedCol = null) {
     const filters = {};
@@ -213,7 +219,8 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
       hth.dataset.col = c;
       const colTip = colTextTables[c] ? colTextTables[c].map(_esc).join('&#10;') : _esc(c);
       hth.innerHTML   = `<span class="tbl-col-name" title="${colTip}">${_esc(c)}</span>`
-                      + `<button class="tbl-filter-btn" data-col="${_esc(c)}" title="Filter">▾</button>`;
+                      + `<button class="tbl-filter-btn" data-col="${_esc(c)}" title="Filter">▾</button>`
+                      + `<div class="tbl-resize-handle"></div>`;
       headerTr.appendChild(hth);
     });
 
@@ -321,6 +328,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
       hth.addEventListener('mousedown', e => {
         if (e.button !== 0) return;
         if (e.target.closest('.tbl-filter-btn')) return;
+        if (e.target.closest('.tbl-resize-handle')) return;
         const idx = cols.indexOf(col);
         if (idx === -1) return;
         _dragColSrc    = idx;
@@ -334,6 +342,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
 
       hth.addEventListener('click', e => {
         if (_dragColActive) return; // was a drag, not a click
+        if (_resizeActive) return;  // was a resize, not a click
         if (e.target.closest('.tbl-filter-btn')) return;
         e.stopPropagation();
         if (openDropdownCol === col) _closeDropdown();
@@ -355,6 +364,8 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
         }
       });
     });
+
+    _bindResizeHandles();
   }
   table.appendChild(thead);
 
@@ -456,6 +467,99 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
       if (onSaveColOrder) onSaveColOrder([...cols]);
     }
   };
+
+  // ── Column resize handlers ────────────────────────────────────────────────
+  const _onResizeMouseMove = (e) => {
+    if (!_resizeCol) return;
+    const newW = Math.max(40, _resizeStartW + (e.clientX - _resizeStartX));
+    _resizeCol.style.width = `${newW}px`;
+    _resizeActive = true;
+  };
+
+  const _onResizeMouseUp = () => {
+    document.removeEventListener('mousemove', _onResizeMouseMove);
+    document.removeEventListener('mouseup',   _onResizeMouseUp);
+    document.body.style.cursor     = '';
+    document.body.style.userSelect = '';
+    document.querySelectorAll('.tbl-resize-handle.tbl-resizing').forEach(h => h.classList.remove('tbl-resizing'));
+    if (_resizeActive && onSaveColWidths) _saveCurrentColWidths();
+    _resizeCol    = null;
+    // Reset _resizeActive after the pending click event fires
+    requestAnimationFrame(() => { _resizeActive = false; });
+  };
+
+  function _saveCurrentColWidths() {
+    const widths = {};
+    colgroup.querySelectorAll('col').forEach((col, i) => {
+      if (i === 0) return; // skip checkbox col
+      const c = cols[i - 1];
+      if (c) widths[c] = parseInt(col.style.width) || col.offsetWidth || 80;
+    });
+    if (onSaveColWidths) onSaveColWidths(widths);
+  }
+
+  function _autoFitAllCols() {
+    const colEls = colgroup.querySelectorAll('col');
+    const ths    = headerTr.querySelectorAll('.tbl-col-header');
+
+    const canvas = document.createElement('canvas');
+    const ctx    = canvas.getContext('2d');
+    if (ths.length) ctx.font = getComputedStyle(ths[0]).font;
+
+    const CELL_PAD = 22;
+    const HDR_PAD  = 44;
+
+    cols.forEach((col, colIdx) => {
+      const colEl   = colEls[colIdx + 1]; // +1 for checkbox col
+      if (!colEl) return;
+
+      let maxW = ctx.measureText(col).width + HDR_PAD;
+
+      const cellIdx = colIdx + 1;
+      tbody.querySelectorAll('tr[data-i]').forEach(tr => {
+        const td = tr.cells[cellIdx];
+        if (!td) return;
+        const text = td.getAttribute('title') || td.textContent || '';
+        if (text) {
+          const w = ctx.measureText(text).width + CELL_PAD;
+          if (w > maxW) maxW = w;
+        }
+      });
+
+      colEl.style.width = `${Math.min(Math.max(Math.ceil(maxW), 60), 600)}px`;
+    });
+
+    if (onSaveColWidths) _saveCurrentColWidths();
+  }
+
+  // ── Bind resize handles (called from _buildHeaders via _bindHeaderEvents) ─
+  function _bindResizeHandles() {
+    headerTr.querySelectorAll('.tbl-col-header').forEach((hth, colIdx) => {
+      const handle = hth.querySelector('.tbl-resize-handle');
+      if (!handle) return;
+
+      handle.addEventListener('mousedown', e => {
+        e.preventDefault();
+        e.stopPropagation();
+        const colEl = colgroup.querySelectorAll('col')[colIdx + 1];
+        if (!colEl) return;
+        _resizeCol    = colEl;
+        _resizeStartX = e.clientX;
+        _resizeStartW = parseInt(colEl.style.width) || colEl.offsetWidth || 80;
+        _resizeActive = false;
+        handle.classList.add('tbl-resizing');
+        document.body.style.cursor     = 'col-resize';
+        document.body.style.userSelect = 'none';
+        document.addEventListener('mousemove', _onResizeMouseMove);
+        document.addEventListener('mouseup',   _onResizeMouseUp);
+      });
+
+      handle.addEventListener('dblclick', e => {
+        e.stopPropagation();
+        _autoFitAllCols();
+      });
+    });
+  }
 
   // ── Floating dropdown (appended to <body> to escape overflow clipping) ────
   const dropdown = document.createElement('div');
@@ -906,6 +1010,8 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
     document.removeEventListener('mouseup', _onDocMouseUp);
     document.removeEventListener('mousemove', _onColMouseMove);
     document.removeEventListener('mouseup', _onColMouseUp);
+    document.removeEventListener('mousemove', _onResizeMouseMove);
+    document.removeEventListener('mouseup',   _onResizeMouseUp);
     wrapEl.removeEventListener('scroll', _onWrapScroll);
     _disposeBatchObserver();
     clearTimeout(_hideScrollTimer);
@@ -922,18 +1028,6 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
   _buildHeaders();
   _renderRows();
   wrapEl.replaceChildren(container);
-
-  // ── Measure + save column widths after first paint ────────────────────────
-  if (onSaveColWidths) {
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      const widths = {};
-      headerTr.querySelectorAll('th').forEach((th, i) => {
-        if (i === 0) return; // skip checkbox column
-        if (cols[i - 1]) widths[cols[i - 1]] = th.offsetWidth;
-      });
-      onSaveColWidths(widths);
-    }));
-  }
 }
 
 function _esc(str) {
