@@ -820,6 +820,27 @@ def select_customer():
     return jsonify({'ok': True})
 
 
+@app.post('/api/auth/change-password')
+@require_auth
+def change_password():
+    data = request.json or {}
+    current = data.get('current_password', '')
+    new_pw  = data.get('new_password', '').strip()
+    if not current or not new_pw:
+        return jsonify({'error': 'current_password and new_password required'}), 400
+    if len(new_pw) < 6:
+        return jsonify({'error': 'New password must be at least 6 characters'}), 400
+    with get_db() as conn:
+        row = conn.execute(
+            'SELECT u.id, u.password_hash FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?',
+            (_get_token(),)
+        ).fetchone()
+        if not row or not _verify_password(current, row['password_hash']):
+            return jsonify({'error': 'Current password is incorrect'}), 400
+        conn.execute('UPDATE users SET password_hash = ? WHERE id = ?', (_hash(new_pw), row['id']))
+    return jsonify({'ok': True})
+
+
 @app.post('/api/auth/logout')
 @require_auth
 def logout():
@@ -2426,6 +2447,11 @@ def update_user(user_id):
         user = conn.execute('SELECT username FROM users WHERE id = ?', (user_id,)).fetchone()
         if not user:
             return jsonify({'error': 'User not found'}), 404
+        if 'password' in data:
+            new_pw = data['password'].strip()
+            if len(new_pw) < 6:
+                return jsonify({'error': 'Password must be at least 6 characters'}), 400
+            conn.execute('UPDATE users SET password_hash = ? WHERE id = ?', (_hash(new_pw), user_id))
         if 'is_admin' in data:
             if user['username'] == 'admin' and not data['is_admin']:
                 return jsonify({'error': 'Cannot remove admin role from "admin" user'}), 403

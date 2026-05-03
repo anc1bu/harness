@@ -5,7 +5,7 @@ import { logout } from '../auth.js';
 import { navigate } from '../router.js';
 import { toast } from '../components/modal.js';
 
-const ALL_SECTIONS   = ['Tables', 'Users'];
+const ALL_SECTIONS = ['Tables', 'Password', 'Users'];
 const ADMIN_SECTIONS = new Set(['Users']);
 
 export function mount(container) {
@@ -57,8 +57,9 @@ async function _renderSection(container, section) {
   content.innerHTML = `<div class="settings-section-title">${section}</div><div id="section-body"></div>`;
   const body = content.querySelector('#section-body');
 
-  if (section === 'Tables') await _renderTables(body);
-  if (section === 'Users')  await _renderUsers(body);
+  if (section === 'Tables')   await _renderTables(body);
+  if (section === 'Password') await _renderPassword(body);
+  if (section === 'Users')    await _renderUsers(body);
 }
 
 async function _renderTables(el) {
@@ -93,15 +94,44 @@ async function _renderTables(el) {
   }
 }
 
+async function _renderPassword(el) {
+  el.innerHTML = `
+    <div class="ctrl-label">Current Password</div>
+    <input type="password" id="pw-current" autocomplete="current-password" />
+    <div class="ctrl-label">New Password</div>
+    <input type="password" id="pw-new" autocomplete="new-password" />
+    <div class="ctrl-label">Confirm New Password</div>
+    <input type="password" id="pw-confirm" autocomplete="new-password" />
+    <button class="btn primary" id="btn-change-pw" style="margin-top:12px">Change Password</button>
+  `;
+  el.querySelector('#btn-change-pw').addEventListener('click', async () => {
+    const current = el.querySelector('#pw-current').value;
+    const newPw   = el.querySelector('#pw-new').value;
+    const confirm = el.querySelector('#pw-confirm').value;
+    if (!current || !newPw || !confirm) { toast('All fields are required.', 'warn'); return; }
+    if (newPw !== confirm) { toast('New passwords do not match.', 'warn'); return; }
+    try {
+      await api.post('/api/auth/change-password', { current_password: current, new_password: newPw });
+      toast('Password changed successfully.', 'ok');
+      el.querySelectorAll('input').forEach(i => i.value = '');
+    } catch (err) {
+      toast(err.message, 'err');
+    }
+  });
+}
+
 async function _renderUsers(el) {
   try {
     const users = await api.get('/api/users');
     el.innerHTML = `
       <div style="margin-bottom:18px">
         ${users.map(u => `
-          <div class="col-list-item" style="padding:10px 12px">
-            <span class="cli-tech">${u.username}</span>
-            <span class="cli-desc">id: ${u.id}</span>
+          <div class="col-list-item" style="padding:10px 12px;gap:10px;flex-wrap:wrap">
+            <span class="cli-tech" style="flex:1;min-width:100px">${u.username}</span>
+            <input type="password" placeholder="New password" data-user-id="${u.id}"
+              class="user-reset-pw" style="width:160px;margin:0" autocomplete="new-password" />
+            <button class="btn inline" data-user-id="${u.id}"
+              style="margin:0;padding:4px 10px;font-size:10px">Reset Password</button>
           </div>
         `).join('')}
       </div>
@@ -112,6 +142,22 @@ async function _renderUsers(el) {
       <input type="password" id="new-password" />
       <button class="btn primary" id="btn-add-user">Add User</button>
     `;
+
+    el.querySelectorAll('.btn.inline[data-user-id]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const uid  = btn.dataset.userId;
+        const input = el.querySelector(`.user-reset-pw[data-user-id="${uid}"]`);
+        const pw = input.value.trim();
+        if (!pw) { toast('Enter a new password first.', 'warn'); return; }
+        try {
+          await api.patch(`/api/users/${uid}`, { password: pw });
+          toast('Password reset.', 'ok');
+          input.value = '';
+        } catch (err) {
+          toast(err.message, 'err');
+        }
+      });
+    });
 
     el.querySelector('#btn-add-user').addEventListener('click', async () => {
       const username = el.querySelector('#new-username').value.trim();

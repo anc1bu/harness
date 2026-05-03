@@ -3,7 +3,7 @@
 const PREVIEW_LIMIT = 5000;
 const MAX_DROPDOWN_VALS = 500;
 
-export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], colTextTables = {}, total: initTotal, onExport, onFilter, onDistinct, colWidths = {}, onSaveColWidths, colOrder = [], onSaveColOrder, onClearLayout }) {
+export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], colTextTables = {}, total: initTotal, onExport, onFilter, onDistinct, colWidths = {}, onSaveColWidths, colOrder = [], onSaveColOrder, onClearLayout, initialFilters = {}, onFilterChange }) {
   // Cleanup previous render
   if (wrapEl._filterCleanup) wrapEl._filterCleanup();
 
@@ -28,6 +28,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
 
   // ── Enriched-col → raw-col mapping (for server filter params) ─────────────
   const enrichedToRaw = new Map(columns.map((c, i) => [c, rawColumns[i] ?? c.split(' - ')[0]]));
+  const rawToEnriched = new Map([...enrichedToRaw.entries()].map(([e, r]) => [r, e]));
 
   // ── Unique values per column (rebuilt after each server fetch) ────────────
   const uniqueVals = new Map();
@@ -48,6 +49,17 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
   let _filterTimer      = null;
   let _dropdownTimer    = null;
   let _currentLabelMap  = {}; // updated each time _renderDropdown runs
+
+  // ── Seed filter state from initialFilters (raw col → pattern) ───────────
+  for (const [rawCol, pattern] of Object.entries(initialFilters)) {
+    const ec = rawToEnriched.get(rawCol);
+    if (!ec) continue;
+    if (pattern.startsWith('=')) {
+      activeCheckboxes.set(ec, new Set(pattern.slice(1).split('||').filter(Boolean)));
+    } else {
+      activePatterns.set(ec, pattern);
+    }
+  }
 
   // ── Row selection state ───────────────────────────────────────────────────
   const selectedRows = new Set(); // Set of data-i strings (indices into _filteredCache)
@@ -83,7 +95,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
 
   // ── Server-side fetch on filter change ────────────────────────────────────
   async function _fetchFiltered() {
-    if (!onFilter) { _renderRows(); return; }
+    if (!onFilter) { _renderRows(); if (onFilterChange) onFilterChange(_buildCurrentFilters()); return; }
     try {
       const data = await onFilter(_buildCurrentFilters());
       rows = data.rows;
@@ -92,6 +104,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
       _closeDropdown();
     } catch { /* ignore fetch errors during typing */ }
     _renderRows();
+    if (onFilterChange) onFilterChange(_buildCurrentFilters());
   }
 
   // ── Build DOM ─────────────────────────────────────────────────────────────
@@ -908,6 +921,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
       _closeDropdown();
       _buildHeaders();
       _renderRows();
+      if (onSaveColOrder) onSaveColOrder([...cols]);
       e.target.value = '';
       e.target.classList.remove('tbl-pin-error');
     } else if (idx === -1 && typed) {
@@ -948,6 +962,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
     activeCheckboxes.clear();
     filterTr.querySelectorAll('.tbl-filter-input').forEach(i => { i.value = ''; });
     _closeDropdown();
+    if (onFilterChange) onFilterChange({});
     if (onFilter) _fetchFiltered(); else _renderRows();
   });
 

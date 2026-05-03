@@ -31,6 +31,7 @@ export function mount(container) {
 
   container._selectedTables   = new Map(); // key=table, value={table,origTable,description}
   container._partitionCleanups = [];
+  container._activeFilters     = {}; // raw col → pattern, shared across table selections
 
   _startClock(container);
   _loadTablesMeta(container);
@@ -811,7 +812,7 @@ async function _loadTableDataInto(container, table, origTable, description, wrap
   };
 
   try {
-    const data = await _fetchData();
+    const data = await _fetchData(container._activeFilters || {});
 
     if (data.dd04t_missing) {
       wrapEl.innerHTML = '<div class="empty-state" style="height:100%"><div class="es-icon" style="font-size:24px">!</div><div>DD04T required</div></div>';
@@ -872,6 +873,8 @@ async function _loadTableDataInto(container, table, origTable, description, wrap
       colOrder: layoutData.col_order || [],
       onSaveColOrder,
       onClearLayout,
+      initialFilters: container._activeFilters || {},
+      onFilterChange: (f) => { container._activeFilters = f; },
     });
 
     if (wrapEl._filterCleanup) {
@@ -915,7 +918,7 @@ async function _loadTableData(container, table, origTable, description = '') {
   };
 
   try {
-    const data = await _fetchData();
+    const data = await _fetchData(container._activeFilters || {});
 
     // V-Show-1: DD04T missing or empty → error, do not show
     if (data.dd04t_missing) {
@@ -986,6 +989,8 @@ async function _loadTableData(container, table, origTable, description = '') {
       colOrder: layoutData.col_order || [],
       onSaveColOrder,
       onClearLayout,
+      initialFilters: container._activeFilters || {},
+      onFilterChange: (f) => { container._activeFilters = f; },
     });
 
     // For server-side tables: prefetch all column distinct values in the background
