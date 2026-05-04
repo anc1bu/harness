@@ -3,7 +3,7 @@
 const PREVIEW_LIMIT = 5000;
 const MAX_DROPDOWN_VALS = 500;
 
-export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], colTextTables = {}, total: initTotal, onExport, onFilter, onDistinct, colWidths = {}, onSaveColWidths, colOrder = [], onSaveColOrder, onClearLayout, initialFilters = {}, onFilterChange }) {
+export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], colTextTables = {}, total: initTotal, onExport, onFilter, onDistinct, colWidths = {}, onSaveColWidths, colOrder = [], onSaveColOrder, onClearLayout, initialFilters = {}, onFilterChange, missingDescCols = new Set() }) {
   // Cleanup previous render
   if (wrapEl._filterCleanup) wrapEl._filterCleanup();
 
@@ -16,6 +16,14 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
 
   // Apply saved column order (keep any new cols not in saved order at the end)
   const _origCols = [...cols];
+
+  // Precompute plain-text cell tooltip for columns with missing descriptions.
+  // Used to show the column-header hint on cells that have no " - description" suffix.
+  const _missCellTip = {};
+  for (const c of missingDescCols) {
+    const hints = colTextTables[c];
+    if (hints && hints.length) _missCellTip[c] = hints[0];
+  }
   if (colOrder.length) {
     const saved = colOrder.filter(c => cols.includes(c));
     const extra = cols.filter(c => !saved.includes(c));
@@ -55,9 +63,15 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
     const ec = rawToEnriched.get(rawCol);
     if (!ec) continue;
     if (pattern.startsWith('=')) {
-      activeCheckboxes.set(ec, new Set(pattern.slice(1).split('||').filter(Boolean)));
+      const vals = new Set(pattern.slice(1).split('||').filter(Boolean));
+      activeCheckboxes.set(ec, vals);
+      if (!onFilter) activeFilters.set(ec, vals);
     } else {
       activePatterns.set(ec, pattern);
+      if (!onFilter) {
+        const matching = uniqueVals.get(ec)?.filter(v => _matchesPattern(v, pattern)) ?? [];
+        if (matching.length) activeFilters.set(ec, new Set(matching));
+      }
     }
   }
 
@@ -93,9 +107,14 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
     return filters;
   }
 
+  // Builds filter state for cross-table carryover (uses text patterns, not enriched values)
+  function _buildFiltersForCarryover() {
+    return _buildCurrentFilters();
+  }
+
   // ── Server-side fetch on filter change ────────────────────────────────────
   async function _fetchFiltered() {
-    if (!onFilter) { _renderRows(); if (onFilterChange) onFilterChange(_buildCurrentFilters()); return; }
+    if (!onFilter) { _renderRows(); if (onFilterChange) onFilterChange(_buildFiltersForCarryover()); return; }
     try {
       const data = await onFilter(_buildCurrentFilters());
       rows = data.rows;
@@ -318,7 +337,10 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
           const matching = text ? uniqueVals.get(col)?.filter(v => _matchesPattern(v, text)) ?? [] : [];
           if (matching.length) activeFilters.set(col, new Set(matching));
           else activeFilters.delete(col);
+          if (text) activePatterns.set(col, text);
+          else activePatterns.delete(col);
           _renderRows();
+          if (onFilterChange) onFilterChange(_buildFiltersForCarryover());
         }
       });
     });
@@ -619,8 +641,10 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
       let tr = `<tr data-i="${idx}"${sel ? ' class="tbl-row-selected"' : ''}>`;
       tr += `<td class="tbl-sel-td"><input type="checkbox" class="tbl-sel-cb"${sel ? ' checked' : ''}></td>`;
       cols.forEach(c => {
-        const v = _esc(String(r[c] ?? ''));
-        tr += `<td title="${v}">${v}</td>`;
+        const rawVal = String(r[c] ?? '');
+        const v = _esc(rawVal);
+        const tip = (_missCellTip[c] && !rawVal.includes(' - ')) ? _esc(_missCellTip[c]) : v;
+        tr += `<td title="${tip}">${v}</td>`;
       });
       return tr + '</tr>';
     }).join('');
@@ -829,8 +853,10 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
         if (e.target.checked) vis.forEach(v => sel.add(v));
         else                   vis.forEach(v => sel.delete(v));
         if (sel.size) activeFilters.set(col, sel); else activeFilters.delete(col);
+        activePatterns.delete(col);
         _renderRows();
         _renderDropdown(col, rawCol, anchorEl, text, false);
+        if (onFilterChange) onFilterChange(_buildFiltersForCarryover());
       }
     });
 
@@ -851,8 +877,10 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
           const sel = new Set(activeFilters.get(col) || []);
           if (e.target.checked) sel.add(val); else sel.delete(val);
           if (sel.size) activeFilters.set(col, sel); else activeFilters.delete(col);
+          activePatterns.delete(col);
           _renderRows();
           _renderDropdown(col, rawCol, anchorEl, text, false);
+          if (onFilterChange) onFilterChange(_buildFiltersForCarryover());
         }
       });
     });
@@ -899,6 +927,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
       const sel = activeFilters.get(col);
       if (filterInputEl) filterInputEl.value = sel?.size ? [...sel].map(v => _currentLabelMap[v] || v).join(' | ') : '';
       _renderRows();
+      if (onFilterChange) onFilterChange(_buildFiltersForCarryover());
     }
   }
 
@@ -1042,6 +1071,8 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
   // ── Initial render ────────────────────────────────────────────────────────
   _buildHeaders();
   _renderRows();
+  // For server-side tables with carried-over filters, trigger a filtered fetch immediately.
+  if (onFilter && Object.keys(initialFilters).length > 0) _fetchFiltered();
   wrapEl.replaceChildren(container);
 }
 

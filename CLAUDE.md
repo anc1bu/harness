@@ -136,17 +136,15 @@ renderTable(wrapEl, {
   colWidths, onSaveColWidths,
   colOrder, onSaveColOrder, onClearLayout,
   initialFilters,   // {raw_col: pattern} — pre-seed filter state
-  onFilterChange,   // (filters) → void — called on every server-side filter change + clear
+  onFilterChange,   // (filters) → void — called on every filter change (both server-side and client-side) + clear
 })
 ```
 
 Constants: `PREVIEW_LIMIT = 5000`, `RENDER_BATCH = 200` (lazy via IntersectionObserver), `MAX_DROPDOWN_VALS = 500`.
 
-Filter state: `activeFilters` (client-side, `col → Set<string>`), `activePatterns` (server text, `col → string`), `activeCheckboxes` (server IN, `col → Set<string>`). Keys are enriched column names. `_buildCurrentFilters()` maps them back to raw names for API calls.
+Filter state: `activeFilters` (client-side, `col → Set<string>`), `activePatterns` (server text, `col → string`), `activeCheckboxes` (server IN, `col → Set<string>`). Keys are enriched column names. `_buildCurrentFilters()` maps server-side state back to raw names. `_buildFiltersForCarryover()` includes `activeFilters` too — used for `onFilterChange`.
 
-`initialFilters` seeding: builds `rawToEnriched` reverse map, seeds `activePatterns`/`activeCheckboxes` before first render. Columns absent from the new table are silently skipped.
-
-**Known limitation**: client-side tables (all rows fit in one fetch, `onFilter = undefined`) do not call `onFilterChange` on user interaction — they call `_renderRows()` directly. `_activeFilters` is only updated by server-side tables.
+`initialFilters` seeding: builds `rawToEnriched` reverse map; seeds `activePatterns`/`activeCheckboxes` (server-side) and `activeFilters` (client-side, matched against `uniqueVals`) before first render. Columns absent from the new table are silently skipped.
 
 Pin column: type exact name + Enter → `cols.unshift(col)` → `_buildHeaders()` + `_renderRows()` + `onSaveColOrder()`.
 

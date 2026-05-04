@@ -663,6 +663,7 @@ def init_db():
             PRIMARY KEY (user_id, table_name)
         )''',
         'ALTER TABLE user_table_prefs ADD COLUMN col_widths TEXT',
+        'ALTER TABLE _table_meta ADD COLUMN miss_enrich_cols TEXT',
     ]:
         try:
             conn.execute(sql)
@@ -1474,6 +1475,23 @@ def _bg_insert(job_id, custname, file_path, headers, data_rows,
         # Invalidate enrichment cache so fresh metadata is used after any upload
         _invalidate_enrichment_cache()
 
+        # ── Enrichment coverage check ─────────────────────────────────────────
+        # Run once at upload time; result cached in _table_meta.miss_enrich_cols.
+        # Clear stale miss caches for other tables (a text table may have changed).
+        with get_db() as conn:
+            conn.execute('UPDATE upload_jobs SET phase=? WHERE job_id=?', ('checking', job_id))
+        with get_db() as conn:
+            conn.execute(
+                'UPDATE _table_meta SET miss_enrich_cols=NULL WHERE custname=? AND table_name!=?',
+                (custname, db_table_name)
+            )
+        with get_db() as conn:
+            miss_cols = _check_enrich_coverage(conn, db_table_name, table_name, custname, system, headers)
+            conn.execute(
+                'UPDATE _table_meta SET miss_enrich_cols=? WHERE table_name=?',
+                (json.dumps(sorted(miss_cols)), db_table_name)
+            )
+
         with get_db() as conn:
             conn.execute(
                 'UPDATE upload_jobs SET status=?, rows_inserted=?, orig_table=?, table_name=?, table_type=? WHERE job_id=?',
@@ -1550,6 +1568,62 @@ def _cached_setup_enrichment(conn, orig_table, custname, system, raw_cols, skip_
     result = _setup_enrichment(conn, orig_table, custname, system, raw_cols, skip_text_cols)
     _enrichment_cache[key] = result
     return result
+
+
+def _check_enrich_coverage(conn, db_table_name, orig_table, custname, system, headers):
+    """Return set of raw column names where enrichment has at least one cell without a description.
+    Runs at upload time; result is cached in _table_meta.miss_enrich_cols."""
+    miss_cols = set()
+    try:
+        skip_cols = frozenset({'STUNR', 'ZAEHK'}) if orig_table.upper() == 'T683S' else frozenset()
+        enr = _cached_setup_enrichment(conn, orig_table, custname, system, headers, skip_text_cols=skip_cols)
+
+        for rc, ec, cfg in enr['dd07t_triples']:
+            preload = cfg.get('_preload', {})
+            if not preload:
+                continue
+            vals = {r[0] for r in conn.execute(
+                f'SELECT DISTINCT "{rc}" FROM "{db_table_name}" '
+                f'WHERE "{rc}" IS NOT NULL AND TRIM("{rc}") != ""'
+            ).fetchall()}
+            if any(v not in preload for v in vals):
+                miss_cols.add(rc)
+
+        for rc, ec, cfg in enr['text_triples']:
+            preload   = cfg.get('_preload', {})
+            avail_kfs = cfg.get('_available_kfs', [])
+            if not preload or not avail_kfs:
+                continue
+            tkf      = cfg.get('text_key_field', rc)
+            cols_sql = ', '.join(f'"{kf}"' for kf in avail_kfs)
+            for row in conn.execute(f'SELECT DISTINCT {cols_sql} FROM "{db_table_name}"').fetchall():
+                key_vals = tuple(
+                    row[rc] if kf == tkf and tkf != rc else row[kf]
+                    for kf in avail_kfs
+                )
+                if any(v is None or str(v).strip() == '' for v in key_vals):
+                    continue
+                if key_vals not in preload:
+                    miss_cols.add(rc)
+                    break
+
+        for rc, ec, cfg in enr.get('tmc1t_triples', []):
+            preload   = cfg.get('_preload', {})
+            kvewe_col = cfg.get('_kvewe_col')
+            if not preload or not kvewe_col:
+                continue
+            for row in conn.execute(
+                f'SELECT DISTINCT "{kvewe_col}", "{rc}" FROM "{db_table_name}" '
+                f'WHERE "{kvewe_col}" IS NOT NULL AND "{rc}" IS NOT NULL'
+            ).fetchall():
+                key = str(row[kvewe_col] or '').strip() + str(row[rc] or '').strip()
+                if key and key not in preload:
+                    miss_cols.add(rc)
+                    break
+    except Exception:
+        pass
+    return miss_cols
+
 
 # ── Enrichment helpers ────────────────────────────────────────────────────
 
@@ -2061,7 +2135,7 @@ def get_table_data(table):
     limit    = max(1, min(int(request.args.get('limit', 5000)), 10000))
     with get_db() as conn:
         meta = conn.execute(
-            'SELECT orig_table, system, col_widths FROM _table_meta WHERE table_name = ? AND custname = ?',
+            'SELECT orig_table, system, col_widths, miss_enrich_cols FROM _table_meta WHERE table_name = ? AND custname = ?',
             (table, custname)
         ).fetchone()
         if not meta:
@@ -2091,7 +2165,7 @@ def get_table_data(table):
         if not raw_rows:
             return jsonify({'columns': [], 'raw_columns': [], 'rows': [], 'total': total, 'offset': offset, 'limit': limit,
                             'dd04t_missing': False, 'dd08l_missing': False, 'partial_descriptions': False,
-                            'missing_fields': [], 'col_text_tables': {}})
+                            'missing_fields': [], 'col_text_tables': {}, 'cells_missing_desc': []})
 
         raw_cols  = list(raw_rows[0].keys())
         is_t683s  = orig_table.upper() == 'T683S'
@@ -2123,6 +2197,27 @@ def get_table_data(table):
             if rc in col_hints
         }
 
+        raw_to_enriched = dict(zip(raw_cols, enr['enriched_cols']))
+        miss_raw = json.loads(meta['miss_enrich_cols']) if meta['miss_enrich_cols'] else []
+        cells_missing_desc = [raw_to_enriched[rc] for rc in miss_raw if rc in raw_to_enriched]
+
+        # For miss columns that have no col_hint yet, add one pointing to the source table.
+        # This ensures the cell tooltip (and column header tooltip) shows useful guidance.
+        for rc in miss_raw:
+            ec = raw_to_enriched.get(rc)
+            if not ec or ec in col_text_tables:
+                continue
+            cfg = enr['col_lookup'].get(rc, {})
+            src = cfg.get('source')
+            if src == 'tmc1t':
+                hint = f'Update TMC1T to see all {rc} descriptions'
+            elif src == 'dd07t':
+                hint = f'Update DD07T to see all {rc} descriptions'
+            else:
+                tt = cfg.get('text_table', '')
+                hint = f'Update {tt} to see all {rc} descriptions' if tt else f'Some {rc} values are missing descriptions'
+            col_text_tables[ec] = [hint]
+
     return jsonify({
         'columns':              enr['enriched_cols'],
         'raw_columns':          raw_cols,
@@ -2135,6 +2230,7 @@ def get_table_data(table):
         'partial_descriptions': enr['partial_descriptions'],
         'missing_fields':       enr['missing_fields'],
         'col_text_tables':      col_text_tables,
+        'cells_missing_desc':   cells_missing_desc,
         'col_widths':           col_widths,
     })
 

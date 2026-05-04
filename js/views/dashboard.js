@@ -812,7 +812,7 @@ async function _loadTableDataInto(container, table, origTable, description, wrap
   };
 
   try {
-    const data = await _fetchData(container._activeFilters || {});
+    const data = await _fetchData({});
 
     if (data.dd04t_missing) {
       wrapEl.innerHTML = '<div class="empty-state" style="height:100%"><div class="es-icon" style="font-size:24px">!</div><div>DD04T required</div></div>';
@@ -875,6 +875,7 @@ async function _loadTableDataInto(container, table, origTable, description, wrap
       onClearLayout,
       initialFilters: container._activeFilters || {},
       onFilterChange: (f) => { container._activeFilters = f; },
+      missingDescCols: new Set(data.cells_missing_desc || []),
     });
 
     if (wrapEl._filterCleanup) {
@@ -918,7 +919,7 @@ async function _loadTableData(container, table, origTable, description = '') {
   };
 
   try {
-    const data = await _fetchData(container._activeFilters || {});
+    const data = await _fetchData({});
 
     // V-Show-1: DD04T missing or empty → error, do not show
     if (data.dd04t_missing) {
@@ -991,6 +992,7 @@ async function _loadTableData(container, table, origTable, description = '') {
       onClearLayout,
       initialFilters: container._activeFilters || {},
       onFilterChange: (f) => { container._activeFilters = f; },
+      missingDescCols: new Set(data.cells_missing_desc || []),
     });
 
     // For server-side tables: prefetch all column distinct values in the background
