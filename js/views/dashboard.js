@@ -29,9 +29,17 @@ function _classifyTable(name) {
 export function mount(container) {
   container.innerHTML = _html();
 
-  container._selectedTables   = new Map(); // key=table, value={table,origTable,description}
+  container._selectedTables    = new Map(); // key=table, value={table,origTable,description}
   container._partitionCleanups = [];
   container._activeFilters     = {}; // raw col → pattern, shared across table selections
+  container._clickOrder        = []; // orig_table names, most-recently-clicked first
+  container._partitionBodies      = new Map(); // table → bodyEl
+  container._partitionDescriptions = new Map(); // table → {origTable, description}
+  container._partitionColumns     = new Map(); // table → rawColumns[]
+  container._linkFilters          = new Map(); // table → {rawCol: pattern}
+  container._tableLink            = null;      // {srcTable,drillRawCol,bridgeRawCol,targetTable,targetRawCol}
+  container._linkBarEl            = null;
+  container._partitionTables      = [];
 
   _startClock(container);
   _loadTablesMeta(container);
@@ -352,6 +360,15 @@ function _rowHtml(t, draggable = false, selected = false) {
   `;
 }
 
+function _recordClick(container, row) {
+  const orig = row.dataset.origTable;
+  if (!orig) return;
+  container._clickOrder = [orig, ...(container._clickOrder || []).filter(t => t !== orig)];
+  // Move row to top of its tbody instantly
+  const tb = row.closest('tbody');
+  if (tb && tb.firstElementChild !== row) tb.insertBefore(row, tb.firstElementChild);
+}
+
 function _bindTbody(tbody, container) {
   tbody.querySelectorAll('.mt-del').forEach(btn => {
     btn.addEventListener('click', (e) => {
@@ -378,6 +395,7 @@ function _bindTbody(tbody, container) {
           description: row.dataset.description || '',
         });
         row.classList.add('mt-row-checked');
+        _recordClick(container, row);
       } else {
         sel.delete(row.dataset.table);
         row.classList.remove('mt-row-checked');
@@ -390,6 +408,8 @@ function _bindTbody(tbody, container) {
     row.addEventListener('click', (e) => {
       if (e.target.closest('.mt-select-cb') || e.target.closest('.mt-del')) return;
       if (container._tableLoading) return;
+
+      _recordClick(container, row);
 
       const sel = container._selectedTables;
       sel.clear();
@@ -412,10 +432,23 @@ function _bindTbody(tbody, container) {
   });
 }
 
+function _sortByClickOrder(tables, clickOrder) {
+  if (!clickOrder?.length) return tables;
+  return [...tables].sort((a, b) => {
+    const ia = clickOrder.indexOf(a.orig_table);
+    const ib = clickOrder.indexOf(b.orig_table);
+    if (ia === ib) return 0;
+    if (ia === -1) return 1;
+    if (ib === -1) return -1;
+    return ia - ib;
+  });
+}
+
 function _fillDraggableTbody(tbody, tables, panel, emptyMsg, container, subPanels = []) {
-  const sel = container._selectedTables || new Map();
-  tbody.innerHTML = tables.length
-    ? tables.map(t => _rowHtml(t, true, sel.has(t.table))).join('')
+  const sel    = container._selectedTables || new Map();
+  const sorted = _sortByClickOrder(tables, container._clickOrder);
+  tbody.innerHTML = sorted.length
+    ? sorted.map(t => _rowHtml(t, true, sel.has(t.table))).join('')
     : `<tr><td colspan="6" class="meta-empty">${emptyMsg}</td></tr>`;
   _bindTbody(tbody, container);
   _bindDragDrop(tbody, panel, container, subPanels);
@@ -474,9 +507,10 @@ function _bindDragDrop(tbody, panel, container, subPanels = []) {
 const _EXPECTED_BASIS = ['DD03L', 'DD04T', 'DD07T', 'DD02T', 'DD08L'];
 
 function _fillBasisTbody(tbody, tables, container) {
-  const sel = container._selectedTables || new Map();
-  const uploaded = new Set(tables.map(t => t.orig_table.toUpperCase()));
-  let html = tables.map(t => _rowHtml(t, false, sel.has(t.table))).join('');
+  const sel    = container._selectedTables || new Map();
+  const sorted = _sortByClickOrder(tables, container._clickOrder);
+  const uploaded = new Set(sorted.map(t => t.orig_table.toUpperCase()));
+  let html = sorted.map(t => _rowHtml(t, false, sel.has(t.table))).join('');
   for (const name of _EXPECTED_BASIS) {
     if (!uploaded.has(name)) {
       html += `
@@ -778,6 +812,20 @@ function _renderPartitioned(container, tables) {
   if (nameLabel) nameLabel.textContent = `${tables.length} tables`;
   if (descLabel) descLabel.textContent = '';
 
+  // Reset link state for fresh partition set
+  container._partitionBodies       = new Map();
+  container._partitionDescriptions = new Map();
+  container._partitionColumns      = new Map();
+  container._linkFilters           = new Map();
+  container._tableLink             = null;
+  container._partitionTables       = tables;
+
+  const linkBarEl = document.createElement('div');
+  linkBarEl.className = 'tbl-link-bar';
+  container._linkBarEl = linkBarEl;
+  wrapEl.appendChild(linkBarEl);
+  _renderLinkBar(container);
+
   container._partitionCleanups = [];
 
   for (const t of tables) {
@@ -796,12 +844,155 @@ function _renderPartitioned(container, tables) {
     partition.appendChild(body);
     wrapEl.appendChild(partition);
 
+    container._partitionBodies.set(t.table, body);
+    container._partitionDescriptions.set(t.table, { origTable: t.origTable, description: t.description });
+
     _loadTableDataInto(container, t.table, t.origTable, t.description, body);
   }
 }
 
+// ── Table link bar ─────────────────────────────────────────────────────────
+
+function _renderLinkBar(container) {
+  const linkBarEl = container._linkBarEl;
+  if (!linkBarEl) return;
+  const link = container._tableLink;
+
+  if (!link) {
+    linkBarEl.innerHTML = `<button class="tbl-link-btn">🔗 Link Tables</button>`;
+    linkBarEl.querySelector('.tbl-link-btn').addEventListener('click', () => _showLinkForm(container));
+    return;
+  }
+
+  const srcMeta    = container._partitionDescriptions?.get(link.srcTable);
+  const targetMeta = container._partitionDescriptions?.get(link.targetTable);
+  linkBarEl.innerHTML = `
+    <span class="tbl-link-active-label">
+      🔗 <strong>${_esc(srcMeta?.origTable || link.srcTable)}.${_esc(link.drillRawCol)}</strong>
+      <span class="tbl-link-dim">key:</span> ${_esc(link.bridgeRawCol)}
+      <span class="tbl-link-dim">→</span>
+      <strong>${_esc(targetMeta?.origTable || link.targetTable)}.${_esc(link.targetRawCol)}</strong>
+      <span class="tbl-link-dim">— click a ${_esc(link.drillRawCol)} cell to filter</span>
+    </span>
+    <button class="tbl-link-clear-btn">✕ CLEAR</button>
+  `;
+  linkBarEl.querySelector('.tbl-link-clear-btn').addEventListener('click', async () => {
+    container._tableLink   = null;
+    container._linkFilters = new Map();
+    _renderLinkBar(container);
+    for (const t of (container._partitionTables || [])) {
+      await _reloadPartition(container, t.table);
+    }
+  });
+}
+
+function _showLinkForm(container) {
+  const linkBarEl = container._linkBarEl;
+  if (!linkBarEl) return;
+  const tables = container._partitionTables || [];
+
+  const getColOpts = (table, selected = '') => {
+    const cols = container._partitionColumns?.get(table) || [];
+    if (!cols.length) return '<option value="">— loading —</option>';
+    return cols.map(c => `<option value="${_esc(c)}"${c === selected ? ' selected' : ''}>${_esc(c)}</option>`).join('');
+  };
+
+  const tableOpts = (selected) =>
+    tables.map(t => `<option value="${_esc(t.table)}"${t.table === selected ? ' selected' : ''}>${_esc(t.origTable)}</option>`).join('');
+
+  const srcTable    = tables[0]?.table || '';
+  const targetTable = tables[1]?.table || '';
+
+  // Auto-suggest bridge/target col as first common column between the two tables
+  const srcCols    = container._partitionColumns?.get(srcTable)    || [];
+  const targetCols = container._partitionColumns?.get(targetTable) || [];
+  const commonCol  = srcCols.find(c => targetCols.includes(c)) || '';
+
+  linkBarEl.innerHTML = `
+    <div class="tbl-link-form">
+      <span class="tbl-link-lbl">Source:</span>
+      <select class="tbl-link-sel" id="lf-src-table">${tableOpts(srcTable)}</select>
+      <span class="tbl-link-lbl">click</span>
+      <select class="tbl-link-sel" id="lf-drill-col">${getColOpts(srcTable)}</select>
+      <span class="tbl-link-lbl">key</span>
+      <select class="tbl-link-sel" id="lf-bridge-col">${getColOpts(srcTable, commonCol)}</select>
+      <span class="tbl-link-lbl">→ filter:</span>
+      <select class="tbl-link-sel" id="lf-target-table">${tableOpts(targetTable)}</select>
+      <select class="tbl-link-sel" id="lf-target-col">${getColOpts(targetTable, commonCol)}</select>
+      <button class="tbl-link-apply-btn">Apply</button>
+      <button class="tbl-link-cancel-btn">Cancel</button>
+    </div>
+  `;
+
+  const srcSel       = linkBarEl.querySelector('#lf-src-table');
+  const drillSel     = linkBarEl.querySelector('#lf-drill-col');
+  const bridgeSel    = linkBarEl.querySelector('#lf-bridge-col');
+  const targetSel    = linkBarEl.querySelector('#lf-target-table');
+  const targetColSel = linkBarEl.querySelector('#lf-target-col');
+
+  srcSel.addEventListener('change', () => {
+    const prevBridge = bridgeSel.value;
+    drillSel.innerHTML  = getColOpts(srcSel.value);
+    bridgeSel.innerHTML = getColOpts(srcSel.value, prevBridge);
+  });
+  targetSel.addEventListener('change', () => {
+    const prevTarget = targetColSel.value;
+    targetColSel.innerHTML = getColOpts(targetSel.value, prevTarget);
+  });
+
+  linkBarEl.querySelector('.tbl-link-apply-btn').addEventListener('click', async () => {
+    const srcTable     = srcSel.value;
+    const drillRawCol  = drillSel.value;
+    const bridgeRawCol = bridgeSel.value;
+    const targetTable  = targetSel.value;
+    const targetRawCol = targetColSel.value;
+
+    if (!srcTable || !drillRawCol || drillRawCol === '— loading —') {
+      toast('Table data still loading, please wait', 'warn'); return;
+    }
+    if (srcTable === targetTable) {
+      toast('Source and target must be different tables', 'warn'); return;
+    }
+
+    container._tableLink = { srcTable, drillRawCol, bridgeRawCol, targetTable, targetRawCol };
+    _renderLinkBar(container);
+    await _reloadPartition(container, srcTable);
+  });
+
+  linkBarEl.querySelector('.tbl-link-cancel-btn').addEventListener('click', () => _renderLinkBar(container));
+}
+
+async function _activateLink(container, drillValue) {
+  const link = container._tableLink;
+  if (!link) return;
+  const { srcTable, drillRawCol, bridgeRawCol, targetTable, targetRawCol } = link;
+
+  container._linkFilters.set(srcTable, { [drillRawCol]: drillValue });
+  await _reloadPartition(container, srcTable);
+
+  try {
+    const params = new URLSearchParams({ col: bridgeRawCol });
+    params.set(`f.${drillRawCol}`, drillValue);
+    const res    = await api.get(`/api/tables/${encodeURIComponent(srcTable)}/distinct?${params}`);
+    const values = (res.values || []).filter(v => v !== '');
+    container._linkFilters.set(targetTable, values.length ? { [targetRawCol]: '=' + values.join('||') } : {});
+    await _reloadPartition(container, targetTable);
+  } catch (err) {
+    toast(`Link filter failed: ${err.message}`, 'err');
+  }
+}
+
+async function _reloadPartition(container, table) {
+  const bodyEl = container._partitionBodies?.get(table);
+  const meta   = container._partitionDescriptions?.get(table);
+  if (!bodyEl || !meta) return;
+  await _loadTableDataInto(container, table, meta.origTable, meta.description, bodyEl);
+}
+
 async function _loadTableDataInto(container, table, origTable, description, wrapEl) {
   wrapEl.innerHTML = '<div class="tbl-loading"><div class="tbl-spinner"></div><span>Loading…</span></div>';
+
+  const linkFilters = container._linkFilters?.get(table) || {};
 
   const _fetchData = (filters = {}) => {
     const params = new URLSearchParams({ offset: 0, limit: 10000 });
@@ -812,7 +1003,7 @@ async function _loadTableDataInto(container, table, origTable, description, wrap
   };
 
   try {
-    const data = await _fetchData({});
+    const data = await _fetchData(linkFilters);
 
     if (data.dd04t_missing) {
       wrapEl.innerHTML = '<div class="empty-state" style="height:100%"><div class="es-icon" style="font-size:24px">!</div><div>DD04T required</div></div>';
@@ -831,6 +1022,16 @@ async function _loadTableDataInto(container, table, origTable, description, wrap
       return;
     }
 
+    if (container._partitionColumns) container._partitionColumns.set(table, data.raw_columns || []);
+
+    const link = container._tableLink;
+    const onCellClick = (link && link.srcTable === table) ? ({ rawCol, value }) => {
+      if (rawCol !== link.drillRawCol) return;
+      // Cell values may be enriched ("ZFR000 - Description") — backend needs the raw code only
+      const rawValue = value.includes(' - ') ? value.slice(0, value.indexOf(' - ')) : value;
+      _activateLink(container, rawValue);
+    } : undefined;
+
     const onExport = () => {
       const token = localStorage.getItem('token') || '';
       const url = `/api/tables/${encodeURIComponent(table)}/export?token=${encodeURIComponent(token)}`;
@@ -839,10 +1040,10 @@ async function _loadTableDataInto(container, table, origTable, description, wrap
       document.body.appendChild(a); a.click(); document.body.removeChild(a);
     };
     const allLoaded = data.total <= data.rows.length;
-    const onFilter  = allLoaded ? undefined : (filters) => _fetchData(filters);
+    const onFilter  = allLoaded ? undefined : (filters) => _fetchData({ ...linkFilters, ...filters });
     const onDistinct = allLoaded ? undefined : async (rawCol, currentFilters) => {
       const params = new URLSearchParams({ col: rawCol });
-      for (const [col, pat] of Object.entries(currentFilters)) {
+      for (const [col, pat] of Object.entries({ ...linkFilters, ...currentFilters })) {
         if (pat) params.set(`f.${col}`, pat);
       }
       const res = await api.get(`/api/tables/${encodeURIComponent(table)}/distinct?${params}`);
@@ -873,9 +1074,10 @@ async function _loadTableDataInto(container, table, origTable, description, wrap
       colOrder: layoutData.col_order || [],
       onSaveColOrder,
       onClearLayout,
-      initialFilters: container._activeFilters || {},
+      initialFilters: { ...container._activeFilters, ...linkFilters },
       onFilterChange: (f) => { container._activeFilters = f; },
       missingDescCols: new Set(data.cells_missing_desc || []),
+      onCellClick,
     });
 
     if (wrapEl._filterCleanup) {

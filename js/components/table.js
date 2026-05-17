@@ -3,7 +3,7 @@
 const PREVIEW_LIMIT = 5000;
 const MAX_DROPDOWN_VALS = 500;
 
-export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], colTextTables = {}, total: initTotal, onExport, onFilter, onDistinct, colWidths = {}, onSaveColWidths, colOrder = [], onSaveColOrder, onClearLayout, initialFilters = {}, onFilterChange, missingDescCols = new Set() }) {
+export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], colTextTables = {}, total: initTotal, onExport, onFilter, onDistinct, colWidths = {}, onSaveColWidths, colOrder = [], onSaveColOrder, onClearLayout, initialFilters = {}, onFilterChange, missingDescCols = new Set(), onCellClick = null }) {
   // Cleanup previous render
   if (wrapEl._filterCleanup) wrapEl._filterCleanup();
 
@@ -129,6 +129,7 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
   // ── Build DOM ─────────────────────────────────────────────────────────────
   const container = document.createElement('div');
   container.className = 'tbl-container';
+  if (onCellClick) container.classList.add('tbl-has-cell-click');
 
   // ── Export bar ────────────────────────────────────────────────────────────
   const exportBar = document.createElement('div');
@@ -433,9 +434,22 @@ export function renderTable(wrapEl, { rows: initRows, columns, rawColumns = [], 
     _updateSelAllCheckbox();
   });
 
-  // Prevent browser from toggling checkbox state after mousedown already handled it
+  // Prevent browser from toggling checkbox state after mousedown already handled it.
+  // Also fires onCellClick when a data cell is clicked and the callback is set.
   tbody.addEventListener('click', e => {
-    if (e.target.closest('.tbl-sel-cb')) e.preventDefault();
+    if (e.target.closest('.tbl-sel-cb')) { e.preventDefault(); return; }
+    if (!onCellClick) return;
+    const td = e.target.closest('td:not(.tbl-sel-td)');
+    if (!td) return;
+    const tr = td.closest('tr[data-i]');
+    if (!tr) return;
+    const tdIdx = [...tr.cells].indexOf(td) - 1; // -1 for checkbox col
+    if (tdIdx < 0 || tdIdx >= cols.length) return;
+    const col     = cols[tdIdx];
+    const rawCol  = enrichedToRaw.get(col) ?? col.split(' - ')[0];
+    const rowData = _filteredCache[parseInt(tr.dataset.i)];
+    if (!rowData) return;
+    onCellClick({ rawCol, enrichedCol: col, value: String(rowData[col] ?? '') });
   });
 
   const _onDocMouseUp = () => { _dragSelecting = false; };

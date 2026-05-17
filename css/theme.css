@@ -299,6 +299,44 @@ tbody tr.tbl-row-selected:hover td { background: rgba(255, 243, 100, 0.20) !impo
 .tbl-ph-desc { color: var(--text-dim); font-size: 10px; font-weight: 400; letter-spacing: 0.3px; }
 .tbl-partition-body { flex: 1; min-height: 0; overflow: auto; position: relative; }
 
+/* ── Table link bar ─────────────────────────────────────────────────────── */
+.tbl-link-bar {
+  flex-shrink: 0; display: flex; align-items: center; gap: 8px;
+  padding: 4px 12px; background: #0f1623; border-bottom: 1px solid var(--border);
+  font-size: 11px; min-height: 28px; overflow-x: auto; white-space: nowrap;
+}
+.tbl-link-btn {
+  padding: 2px 10px; border: 1px solid var(--border); background: transparent;
+  color: var(--text-dim); cursor: pointer; font-size: 11px; letter-spacing: 0.5px; border-radius: 3px;
+}
+.tbl-link-btn:hover { border-color: var(--accent); color: var(--accent); }
+.tbl-link-form { display: flex; align-items: center; gap: 6px; flex-wrap: nowrap; }
+.tbl-link-lbl { color: var(--text-dim); white-space: nowrap; }
+.tbl-link-dim  { color: var(--text-dim); }
+.tbl-link-sel {
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  font-size: 11px; padding: 2px 4px; border-radius: 3px; max-width: 160px;
+}
+.tbl-link-sel:focus { outline: none; border-color: var(--accent); }
+.tbl-link-apply-btn {
+  padding: 2px 10px; border: 1px solid var(--accent2); background: transparent;
+  color: var(--accent2); cursor: pointer; font-size: 11px; border-radius: 3px;
+}
+.tbl-link-apply-btn:hover { background: rgba(63,185,80,0.10); }
+.tbl-link-cancel-btn {
+  padding: 2px 8px; border: 1px solid var(--border); background: transparent;
+  color: var(--text-dim); cursor: pointer; font-size: 11px; border-radius: 3px;
+}
+.tbl-link-cancel-btn:hover { border-color: var(--text-dim); color: var(--text); }
+.tbl-link-active-label { color: var(--text); font-size: 11px; }
+.tbl-link-clear-btn {
+  padding: 2px 8px; border: 1px solid var(--danger); background: transparent;
+  color: var(--danger); cursor: pointer; font-size: 10px; letter-spacing: 0.5px; border-radius: 3px;
+}
+.tbl-link-clear-btn:hover { background: rgba(248,81,73,0.10); }
+.tbl-has-cell-click td:not(.tbl-sel-td) { cursor: pointer; }
+.tbl-has-cell-click td:not(.tbl-sel-td):hover { background: rgba(137,180,250,0.06); }
+
 /* ── Meta table ────────────────────────────────────────────────────────── */
 .meta-table {
   width: 100%; border-collapse: collapse;
